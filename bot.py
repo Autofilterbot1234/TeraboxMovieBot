@@ -31,7 +31,7 @@ UPDATE_CHANNEL = os.getenv("UPDATE_CHANNEL", "https://t.me/CTGMovieOfficial")
 START_PIC = os.getenv("START_PIC", "https://i.ibb.co/prnGXMr3/photo-2025-05-16-05-15-45-7504908428624527364.jpg")
 
 # নতুন ডিলিট টাইম সেটিংস (সময় সেকেন্ডে)
-MOVIE_DELETE_DELAY = int(os.getenv("MOVIE_DELETE_DELAY_SECONDS", 300))          # ডিফল্ট: 5 মিনিট
+MOVIE_DELETE_DELAY = int(os.getenv("MOVIE_DELETE_DELAY_SECONDS", 300))          # ডিফল্ট: 12 ঘণ্টা
 NOTIFICATION_DELETE_DELAY = int(os.getenv("NOTIFICATION_DELETE_DELAY_SECONDS", 86400)) # ডিফল্ট: 24 ঘণ্টা
 TEMP_MSG_DELETE_DELAY = int(os.getenv("TEMP_MSG_DELETE_DELAY_SECONDS", 300))     # ডিফল্ট: 5 মিনিট
 
@@ -49,6 +49,15 @@ requests_col = db["requests"]
 
 # Indexing - Optimized for faster search
 try:
+    movies_col.drop_index("message_id_1")
+    print("Existing 'message_id_1' index dropped successfully (if it existed).")
+except Exception as e:
+    if "index not found" not in str(e):
+        print(f"Error dropping existing index 'message_id_1': {e}")
+    else:
+        print("'message_id_1' index not found, proceeding with creation.")
+
+try:
     movies_col.create_index("message_id", unique=True, background=True)
     print("Index 'message_id' (unique) ensured successfully.")
 except DuplicateKeyError as e:
@@ -61,8 +70,7 @@ movies_col.create_index("language", background=True)
 movies_col.create_index([("title_clean", ASCENDING)], background=True)
 movies_col.create_index([("language", ASCENDING), ("title_clean", ASCENDING)], background=True)
 movies_col.create_index([("views_count", ASCENDING)], background=True)
-users_col.create_index("is_active", background=True) # নতুন ইনডেক্স
-print("All necessary indexes ensured successfully.")
+print("All other necessary indexes ensured successfully.")
 
 # Ensure the protect_forwarding setting exists and is True by default
 settings_col.update_one(
@@ -170,8 +178,7 @@ async def save_post(_, msg: Message):
             ])
             notification_caption = f"🎬 **নতুন মুভি আপলোড হয়েছে!**\n\n**{movie_to_save['title']}**\n\nএখনই ডাউনলোড করুন!"
 
-            # শুধুমাত্র সক্রিয় এবং নোটিফিকেশন চালু থাকা ইউজারদের খুঁজুন
-            for user in users_col.find({"notify": {"$ne": False}, "is_active": {"$ne": False}}):
+            for user in users_col.find({"notify": {"$ne": False}}):
                 try:
                     if thumbnail_file_id:
                         m = await app.send_photo(
@@ -185,10 +192,9 @@ async def save_post(_, msg: Message):
                     asyncio.create_task(delete_message_later(m.chat.id, m.id, NOTIFICATION_DELETE_DELAY))
                     await asyncio.sleep(0.05)
                 except Exception as e:
-                    # যদি ইউজার ব্লক করে থাকে বা অ্যাকাউন্ট ডিঅ্যাক্টিভেট থাকে
-                    if "BOT_BLOCKED" in str(e) or "PEER_ID_INVALID" in str(e) or "USER_DEACTIVATED" in str(e):
-                        print(f"User {user['_id']} blocked the bot. Marking as inactive.")
-                        users_col.update_one({"_id": user["_id"]}, {"$set": {"is_active": False, "notify": False}})
+                    if "PEER_ID_INVALID" in str(e) or "USER_IS_BOT" in str(e) or "USER_DEACTIVATED_REQUIRED" in str(e) or "BOT_BLOCKED" in str(e):
+                        print(f"Skipping notification to invalid/blocked user {user['_id']}: {e}")
+                        users_col.update_one({"_id": user["_id"]}, {"$set": {"notify": False}})
                     else:
                         print(f"Failed to send notification to user {user['_id']}: {e}")
 
@@ -244,11 +250,7 @@ async def start(_, msg: Message):
 
     users_col.update_one(
         {"_id": msg.from_user.id},
-        {"$set": {
-            "joined": datetime.now(UTC), 
-            "notify": True,
-            "is_active": True  # নতুন বা ফিরে আসা ইউজারকে সক্রিয় হিসেবে মার্ক করা
-         }},
+        {"$set": {"joined": datetime.now(UTC), "notify": True}},
         upsert=True
     )
     btns = InlineKeyboardMarkup([
@@ -285,50 +287,33 @@ async def broadcast(_, msg: Message):
         error_msg = await msg.reply("ব্যবহার: /broadcast আপনার মেসেজ এখানে")
         asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id, TEMP_MSG_DELETE_DELAY))
         return
-        
     count = 0
     message_to_send = msg.text.split(None, 1)[1]
-    
-    # শুধুমাত্র সক্রিয় ইউজারদের খুঁজুন
-    active_users_cursor = users_col.find({"is_active": {"$ne": False}}) 
-    
-    for user in active_users_cursor:
+    for user in users_col.find():
         try:
             await app.send_message(user["_id"], message_to_send)
             count += 1
             await asyncio.sleep(0.05)
         except Exception as e:
-            # যদি ইউজার ব্লক করে থাকে বা অ্যাকাউন্ট ডিঅ্যাক্টিভেট থাকে
-            if "USER_IS_BLOCKED" in str(e) or "PEER_ID_INVALID" in str(e) or "USER_DEACTIVATED" in str(e):
-                print(f"User {user['_id']} is inactive. Marking as inactive.")
-                # ইউজারকে ইনঅ্যাক্টিভ হিসেবে মার্ক করুন
-                users_col.update_one({"_id": user["_id"]}, {"$set": {"is_active": False}})
+            if "PEER_ID_INVALID" in str(e) or "USER_IS_BLOCKED" in str(e) or "USER_BOT" in str(e) or "USER_DEACTIVATED_REQUIRED" in str(e):
+                print(f"Skipping broadcast to invalid/blocked user {user['_id']}: {e}")
             else:
                 print(f"Failed to broadcast to user {user['_id']}: {e}")
-
-    reply_msg = await msg.reply(f"{count} জন সক্রিয় ব্যবহারকারীর কাছে ব্রডকাস্ট পাঠানো হয়েছে।")
+    reply_msg = await msg.reply(f"{count} জন ব্যবহারকারীর কাছে ব্রডকাস্ট পাঠানো হয়েছে।")
     asyncio.create_task(delete_message_later(reply_msg.chat.id, reply_msg.id, TEMP_MSG_DELETE_DELAY))
 
 @app.on_message(filters.command("stats") & filters.user(ADMIN_IDS))
 async def stats(_, msg: Message):
-    total_users = users_col.count_documents({})
-    active_users = users_col.count_documents({"is_active": {"$ne": False}}) # শুধুমাত্র সক্রিয় ইউজার গণনা
+    stats_msg = await msg.reply(
+        f"""মোট ব্যবহারকারী: {users_col.count_documents({})}
+মোট মুভি: {movies_col.count_documents({})}
+মোট ফিডব্যাক: {feedback_col.count_documents({})}
+মোট অনুরোধ: {requests_col.count_documents({})}
 
-    stats_text = f"""📊 **বটের পরিসংখ্যান**
-
-👤 **সক্রিয় ব্যবহারকারী:** `{active_users}`
-👥 **মোট নিবন্ধিত ব্যবহারকারী:** `{total_users}`
-
-🎬 **মোট মুভি:** `{movies_col.count_documents({})}`
-📝 **মোট ফিডব্যাক:** `{feedback_col.count_documents({})}`
-📥 **মোট অনুরোধ:** `{requests_col.count_documents({})}`
-
----
 Developed by: **Ctgmovies23**
 Telegram: @ctgmovies23
 Channel: [All Bot Update My](https://t.me/AllBotUpdatemy)"""
-    
-    stats_msg = await msg.reply(stats_text)
+    )
     asyncio.create_task(delete_message_later(stats_msg.chat.id, stats_msg.id, TEMP_MSG_DELETE_DELAY))
 
 @app.on_message(filters.command("notify") & filters.user(ADMIN_IDS))
@@ -472,7 +457,7 @@ async def request_movie(_, msg: Message):
         except Exception as e:
             print(f"Could not notify admin {admin_id} about request: {e}")
 
-@app.on_message(filters.text & (filters.group | filters.private) & ~filters.command())
+@app.on_message(filters.text & (filters.group | filters.private))
 async def search(_, msg: Message):
     query = msg.text.strip()
     if not query: return
@@ -480,7 +465,7 @@ async def search(_, msg: Message):
 
     user_id = msg.from_user.id
     users_col.update_one(
-        {"_id": user_id}, {"$set": {"last_query": query, "is_active": True}, "$setOnInsert": {"joined": datetime.now(UTC)}}, upsert=True
+        {"_id": user_id}, {"$set": {"last_query": query}, "$setOnInsert": {"joined": datetime.now(UTC)}}, upsert=True
     )
 
     loading_message = await msg.reply("🔎 লোড হচ্ছে, অনুগ্রহ করে অপেক্ষা করুন...", quote=True)
@@ -578,10 +563,6 @@ async def search(_, msg: Message):
 @app.on_callback_query()
 async def callback_handler(_, cq: CallbackQuery):
     data = cq.data
-    user_id = cq.from_user.id
-    
-    # যে কোনো Callback Query আসার মানে ইউজার অ্যাক্টিভ আছে
-    users_col.update_one({"_id": user_id}, {"$set": {"is_active": True}})
 
     if data == "confirm_delete_all_movies":
         movies_col.delete_many({})
@@ -629,20 +610,20 @@ async def callback_handler(_, cq: CallbackQuery):
 
     elif data.startswith("request_movie_"):
         _, user_id_str, encoded_movie_name = data.split("_", 2)
-        user_id_req = int(user_id_str)
+        user_id = int(user_id_str)
         movie_name = urllib.parse.unquote_plus(encoded_movie_name)
         username = cq.from_user.username or cq.from_user.first_name
 
         requests_col.insert_one({
-            "user_id": user_id_req, "username": username, "movie_name": movie_name,
+            "user_id": user_id, "username": username, "movie_name": movie_name,
             "request_time": datetime.now(UTC), "status": "pending"
         })
         
         await cq.answer(f"আপনার অনুরোধ '{movie_name}' সফলভাবে জমা দেওয়া হয়েছে।", show_alert=True)
         
         admin_request_btns = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ সম্পন্ন হয়েছে", callback_data=f"req_fulfilled_{user_id_req}_{encoded_movie_name}"),
-            InlineKeyboardButton("❌ বাতিল করা হয়েছে", callback_data=f"req_rejected_{user_id_req}_{encoded_movie_name}")
+            InlineKeyboardButton("✅ সম্পন্ন হয়েছে", callback_data=f"req_fulfilled_{user_id}_{encoded_movie_name}"),
+            InlineKeyboardButton("❌ বাতিল করা হয়েছে", callback_data=f"req_rejected_{user_id}_{encoded_movie_name}")
         ]])
 
         for admin_id in ADMIN_IDS:
@@ -650,7 +631,7 @@ async def callback_handler(_, cq: CallbackQuery):
                 await app.send_message(
                     admin_id, f"❗ *নতুন মুভির অনুরোধ (ইনলাইন বাটন থেকে)!*\n\n"
                     f"🎬 মুভির নাম: `{movie_name}`\n"
-                    f"👤 ইউজার: [{username}](tg://user?id={user_id_req}) (`{user_id_req}`)",
+                    f"👤 ইউজার: [{username}](tg://user?id={user_id}) (`{user_id}`)",
                     reply_markup=admin_request_btns, disable_web_page_preview=True
                 )
             except Exception as e:
@@ -669,7 +650,7 @@ async def callback_handler(_, cq: CallbackQuery):
     elif data.startswith("like_") or data.startswith("dislike_"):
         action, message_id_str, user_id_str = data.split("_", 2)
         movie_message_id = int(message_id_str)
-        rating_user_id = int(user_id_str)
+        user_id = int(user_id_str)
 
         movie = movies_col.find_one({"message_id": movie_message_id})
         if not movie:
@@ -677,11 +658,11 @@ async def callback_handler(_, cq: CallbackQuery):
             return
 
         if "rated_by" not in movie: movie["rated_by"] = []
-        if rating_user_id in movie["rated_by"]:
+        if user_id in movie["rated_by"]:
             await cq.answer("আপনি ইতিমধ্যেই এই মুভিতে রেটিং দিয়েছেন!", show_alert=True)
             return
 
-        update_query = {"$inc": {}, "$push": {"rated_by": rating_user_id}}
+        update_query = {"$inc": {}, "$push": {"rated_by": user_id}}
         if action == "like": update_query["$inc"]["likes"] = 1
         elif action == "dislike": update_query["$inc"]["dislikes"] = 1
         
@@ -693,20 +674,41 @@ async def callback_handler(_, cq: CallbackQuery):
 
         new_rating_buttons = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton(f"👍 লাইক ({updated_likes})", callback_data="noop_rated"),
-                InlineKeyboardButton(f"👎 ডিসলাইক ({updated_dislikes})", callback_data="noop_rated")
+                InlineKeyboardButton(f"👍 লাইক ({updated_likes})", callback_data="noop"),
+                InlineKeyboardButton(f"👎 ডিসলাইক ({updated_dislikes})", callback_data="noop")
             ]
         ])
 
         try:
             await cq.message.edit_reply_markup(reply_markup=new_rating_buttons)
-            await cq.answer("আপনার রেটিং রেকর্ড করা হয়েছে! ধন্যবাদ।", show_alert=False)
+            await cq.answer("আপনার রেটিং রেকর্ড করা হয়েছে! ধন্যবাদ।", show_alert=True)
         except Exception as e:
             print(f"Error editing message after rating: {e}")
             await cq.answer("রেটিং আপডেট করতে সমস্যা হয়েছে।", show_alert=True)
-    
-    elif data == "noop" or data == "noop_rated":
-        await cq.answer() # No operation, just acknowledge the callback
+
+    elif "_" in data:
+        parts = data.split("_", 3)
+        if len(parts) == 4 and parts[0] in ["has", "no", "soon", "wrong"]: 
+            action, uid, mid, raw_query = parts
+            uid = int(uid)
+            responses = {
+                "has": f"✅ @{cq.from_user.username or cq.from_user.first_name} জানিয়েছেন যে **{raw_query}** মুভিটি ডাটাবেজে আছে। সঠিক নাম লিখে আবার চেষ্টা করুন।",
+                "no": f"❌ @{cq.from_user.username or cq.from_user.first_name} জানিয়েছেন যে **{raw_query}** মুভিটি ডাটাবেজে নেই।",
+                "soon": f"⏳ @{cq.from_user.username or cq.from_user.first_name} জানিয়েছেন যে **{raw_query}** মুভিটি শীঘ্রই আসবে।",
+                "wrong": f"✏️ @{cq.from_user.username or cq.from_user.first_name} বলছেন যে আপনি ভুল নাম লিখেছেন: **{raw_query}**।"
+            }
+            if action in responses:
+                try:
+                    m = await app.send_message(uid, responses[action])
+                    asyncio.create_task(delete_message_later(m.chat.id, m.id, TEMP_MSG_DELETE_DELAY))
+                    await cq.answer("অ্যাডমিনের পক্ষ থেকে উত্তর পাঠানো হয়েছে।")
+                except Exception as e:
+                    await cq.answer("ইউজারকে বার্তা পাঠাতে সমস্যা হয়েছে।", show_alert=True)
+                    print(f"Error sending admin feedback message: {e}")
+            else:
+                await cq.answer("অকার্যকর কলব্যাক ডেটা।", show_alert=True)
+        else:
+            await cq.answer("অকার্যকর কলব্যাক ডেটা।", show_alert=True)
 
 if __name__ == "__main__":
     print("বট শুরু হচ্ছে...")
