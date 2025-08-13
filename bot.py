@@ -6,7 +6,7 @@
 #
 
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ForceReply
 from pymongo import MongoClient, ASCENDING
 from pymongo.errors import OperationFailure, CollectionInvalid, DuplicateKeyError
 from flask import Flask
@@ -31,7 +31,7 @@ UPDATE_CHANNEL = os.getenv("UPDATE_CHANNEL", "https://t.me/CTGMovieOfficial")
 START_PIC = os.getenv("START_PIC", "https://i.ibb.co/prnGXMr3/photo-2025-05-16-05-15-45-7504908428624527364.jpg")
 
 # নতুন ডিলিট টাইম সেটিংস (সময় সেকেন্ডে)
-MOVIE_DELETE_DELAY = int(os.getenv("MOVIE_DELETE_DELAY_SECONDS", 300))          # ডিফল্ট: 12 ঘণ্টা
+MOVIE_DELETE_DELAY = int(os.getenv("MOVIE_DELETE_DELAY_SECONDS", 300))          # ডিফল্ট: 5 মিনিট
 NOTIFICATION_DELETE_DELAY = int(os.getenv("NOTIFICATION_DELETE_DELAY_SECONDS", 86400)) # ডিফল্ট: 24 ঘণ্টা
 TEMP_MSG_DELETE_DELAY = int(os.getenv("TEMP_MSG_DELETE_DELAY_SECONDS", 300))     # ডিফল্ট: 5 মিনিট
 
@@ -457,7 +457,7 @@ async def request_movie(_, msg: Message):
         except Exception as e:
             print(f"Could not notify admin {admin_id} about request: {e}")
 
-@app.on_message(filters.text & (filters.group | filters.private))
+@app.on_message(filters.text & (filters.group | filters.private) & ~filters.command)
 async def search(_, msg: Message):
     query = msg.text.strip()
     if not query: return
@@ -541,13 +541,19 @@ async def search(_, msg: Message):
         asyncio.create_task(delete_message_later(alert.chat.id, alert.id, TEMP_MSG_DELETE_DELAY))
 
         encoded_query = urllib.parse.quote_plus(query)
-        admin_btns = InlineKeyboardMarkup([[
-            InlineKeyboardButton("❌ ভুল নাম", callback_data=f"noresult_wrong_{user_id}_{encoded_query}"),
-            InlineKeyboardButton("⏳ এখনো আসেনি", callback_data=f"noresult_notyet_{user_id}_{encoded_query}")
-        ], [
-            InlineKeyboardButton("📤 আপলোড আছে", callback_data=f"noresult_uploaded_{user_id}_{encoded_query}"),
-            InlineKeyboardButton("🚀 শিগগির আসবে", callback_data=f"noresult_coming_{user_id}_{encoded_query}")
-        ]])
+        admin_btns = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("❌ ভুল নাম", callback_data=f"noresult_wrong_{user_id}_{encoded_query}"),
+                InlineKeyboardButton("⏳ এখনো আসেনি", callback_data=f"noresult_notyet_{user_id}_{encoded_query}")
+            ],
+            [
+                InlineKeyboardButton("📤 আপলোড আছে", callback_data=f"noresult_uploaded_{user_id}_{encoded_query}"),
+                InlineKeyboardButton("🚀 শিগগির আসবে", callback_data=f"noresult_coming_{user_id}_{encoded_query}")
+            ],
+            [
+                InlineKeyboardButton("📝 কাস্টম উত্তর দিন", callback_data=f"noresult_custom_{user_id}_{encoded_query}")
+            ]
+        ])
 
         for admin_id in ADMIN_IDS:
             try:
@@ -560,8 +566,73 @@ async def search(_, msg: Message):
             except Exception as e:
                 print(f"Could not notify admin {admin_id}: {e}")
 
+# নতুন ফাংশন: কাস্টম রিপ্লাই এর জন্য অ্যাডমিনকে প্রম্পট করা
+@app.on_callback_query(filters.regex(r"^noresult_custom_") & filters.user(ADMIN_IDS))
+async def handle_custom_reply_prompt(_, cq: CallbackQuery):
+    try:
+        _, user_id_str, encoded_query = cq.data.split("_", 2)
+        user_id = int(user_id_str)
+        original_query = urllib.parse.unquote_plus(encoded_query)
+
+        prompt_text = (
+            f"➡️ **'{original_query}'** এর জন্য কাস্টম উত্তর দিন।\n\n"
+            f"প্রাপক ইউজার আইডি: `{user_id}`\n\n"
+            "অনুগ্রহ করে আপনার উত্তরটি **এই মেসেজের রিপ্লাই হিসাবে** পাঠান।"
+        )
+
+        await cq.message.edit_text(
+            prompt_text,
+            reply_markup=ForceReply(
+                selective=True,
+                placeholder="এখানে আপনার উত্তর লিখুন..."
+            )
+        )
+        await cq.answer("এখন আপনার কাস্টম উত্তরটি রিপ্লাই করুন।")
+    except Exception as e:
+        print(f"Error in custom reply prompt: {e}")
+        await cq.answer("একটি ত্রুটি ঘটেছে।", show_alert=True)
+
+# নতুন ফাংশন: অ্যাডমিনের কাস্টম রিপ্লাই গ্রহণ এবং ইউজারের কাছে পাঠানো
+@app.on_message(filters.private & filters.user(ADMIN_IDS) & filters.reply)
+async def handle_admin_custom_reply(_, msg: Message):
+    if (
+        msg.reply_to_message and 
+        msg.reply_to_message.from_user.is_self and 
+        "এর জন্য কাস্টম উত্তর দিন" in msg.reply_to_message.text
+    ):
+        match = re.search(r"প্রাপক ইউজার আইডি: `(\d+)`", msg.reply_to_message.text)
+        if not match:
+            return
+
+        target_user_id = int(match.group(1))
+        admin_reply_text = msg.text
+
+        try:
+            user_message = await app.send_message(
+                chat_id=target_user_id,
+                text=f"👨‍💻 অ্যাডমিন আপনার জন্য একটি বার্তা পাঠিয়েছেন:\n\n💬 \"{admin_reply_text}\""
+            )
+            admin_confirm_msg = await msg.reply_text("✅ আপনার উত্তরটি সফলভাবে ব্যবহারকারীকে পাঠানো হয়েছে।")
+
+            await msg.reply_to_message.edit_text(
+                f"~~{msg.reply_to_message.text}~~\n\n---\n**✅ উত্তর পাঠানো সম্পন্ন হয়েছে।**"
+            )
+
+            asyncio.create_task(delete_message_later(user_message.chat.id, user_message.id, TEMP_MSG_DELETE_DELAY))
+            asyncio.create_task(delete_message_later(admin_confirm_msg.chat.id, admin_confirm_msg.id, TEMP_MSG_DELETE_DELAY))
+
+        except Exception as e:
+            error_msg = await msg.reply_text(f"❌ ব্যবহারকারীকে বার্তা পাঠাতে ব্যর্থ হয়েছে।\n\nত্রুটি: `{e}`")
+            asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id, TEMP_MSG_DELETE_DELAY))
+            print(f"Failed to send custom reply from admin {msg.from_user.id} to user {target_user_id}: {e}")
+
 @app.on_callback_query()
 async def callback_handler(_, cq: CallbackQuery):
+    # This handler should not process the custom reply callbacks as they are handled above.
+    if cq.data.startswith("noresult_custom_"):
+        await cq.answer()
+        return
+
     data = cq.data
 
     if data == "confirm_delete_all_movies":
@@ -687,6 +758,8 @@ async def callback_handler(_, cq: CallbackQuery):
             await cq.answer("রেটিং আপডেট করতে সমস্যা হয়েছে।", show_alert=True)
 
     elif "_" in data:
+        # This part handles old admin response callbacks which you might want to deprecate or keep.
+        # It's kept for backward compatibility but won't be triggered by the new buttons.
         parts = data.split("_", 3)
         if len(parts) == 4 and parts[0] in ["has", "no", "soon", "wrong"]: 
             action, uid, mid, raw_query = parts
@@ -708,7 +781,9 @@ async def callback_handler(_, cq: CallbackQuery):
             else:
                 await cq.answer("অকার্যকর কলব্যাক ডেটা।", show_alert=True)
         else:
-            await cq.answer("অকার্যকর কলব্যাক ডেটা।", show_alert=True)
+            await cq.answer() # Answer other callbacks silently
+    else:
+        await cq.answer() # Answer remaining callbacks silently
 
 if __name__ == "__main__":
     print("বট শুরু হচ্ছে...")
