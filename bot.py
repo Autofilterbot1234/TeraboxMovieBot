@@ -3,7 +3,7 @@
 # Developed by: Ctgmovies23
 # Telegram Username: @ctgmovies23
 # Channel Link: https://t.me/AllBotUpdatemy
-# Optimized with RapidFuzz & Caching for High Speed
+# Optimized: RapidFuzz + Background Caching (Ultra Fast)
 # ----------------------------------------------------
 #
 
@@ -70,31 +70,46 @@ settings_col.update_one(
 flask_app = Flask(__name__)
 @flask_app.route("/")
 def home():
-    return "Bot is running with RapidFuzz Speed!"
+    return "Bot is running with Ultra Speed!"
 Thread(target=lambda: flask_app.run(host="0.0.0.0", port=8080)).start() 
 
 # থ্রেড পুল
 thread_pool_executor = ThreadPoolExecutor(max_workers=5)
 
-# ------------------- Caching System (Speed Booster) -------------------
+# ------------------- Advanced Non-Blocking Caching System -------------------
 # এটি মুভির নামগুলো মেমোরিতে সেভ রাখবে যেন বারবার ডাটাবেস কল করতে না হয়
 MOVIE_TITLES_CACHE = []
 LAST_CACHE_TIME = 0
-CACHE_EXPIRY = 600  # 10 মিনিট পর পর ডাটাবেস থেকে লিস্ট আপডেট করবে
+CACHE_EXPIRY = 600  # 10 মিনিট
+
+def update_cache_in_background():
+    """ব্যাকগ্রাউন্ডে ডাটাবেস থেকে টাইটেল লোড করে"""
+    global MOVIE_TITLES_CACHE, LAST_CACHE_TIME
+    try:
+        # শুধুমাত্র টাইটেলগুলো স্ট্রিং হিসেবে লোড করবে
+        titles = [str(t) for t in movies_col.distinct("title") if t]
+        if titles:
+            MOVIE_TITLES_CACHE = titles
+            LAST_CACHE_TIME = time.time()
+            print(f"✅ Cache Updated! Total Movies: {len(MOVIE_TITLES_CACHE)}")
+        else:
+            print("⚠️ Database returned no titles.")
+    except Exception as e:
+        print(f"❌ Cache Update Failed: {e}")
 
 def get_cached_titles():
+    """তাৎক্ষণিক টাইটেল রিটার্ন করে, প্রয়োজনে ব্যাকগ্রাউন্ডে আপডেট করে"""
     global MOVIE_TITLES_CACHE, LAST_CACHE_TIME
     current_time = time.time()
     
-    # ক্যাশ খালি থাকলে বা ১০ মিনিট হয়ে গেলে আপডেট করবে
-    if not MOVIE_TITLES_CACHE or (current_time - LAST_CACHE_TIME > CACHE_EXPIRY):
-        try:
-            MOVIE_TITLES_CACHE = movies_col.distinct("title")
-            LAST_CACHE_TIME = current_time
-            print(f"Cache Updated: {len(MOVIE_TITLES_CACHE)} titles loaded.")
-        except Exception as e:
-            print(f"Cache Update Failed: {e}")
-            
+    # যদি ক্যাশ একদম খালি থাকে (বট কেবল চালু হয়েছে), তবে জোর করে লোড করবে
+    if not MOVIE_TITLES_CACHE:
+        update_cache_in_background()
+    
+    # যদি ১০ মিনিট পার হয়ে যায়, তবে ব্যাকগ্রাউন্ডে আপডেট শুরু করবে (কিন্তু বর্তমান ডাটা রিটার্ন করবে)
+    elif current_time - LAST_CACHE_TIME > CACHE_EXPIRY:
+        Thread(target=update_cache_in_background).start()
+        
     return MOVIE_TITLES_CACHE
 
 # ------------------- হেল্পার ফাংশন -------------------
@@ -192,7 +207,6 @@ async def broadcast_messages(user_ids, message_func, status_msg=None, total_user
                 await status_msg.edit_text(final_text)
         except Exception:
             pass
-    return success, failed
 
 # ------------------- অটো ব্রডকাস্ট -------------------
 async def auto_broadcast_worker(movie_title, message_id, thumbnail_id=None):
@@ -445,7 +459,7 @@ async def request_movie(_, msg: Message):
             await app.send_message(admin_id, f"❗ *নতুন মুভির অনুরোধ!*\n\n🎬 মুভির নাম: `{movie_name}`\n👤 ইউজার: [{username}](tg://user?id={user_id}) (`{user_id}`)", reply_markup=admin_request_btns, disable_web_page_preview=True)
         except Exception: pass
 
-# ------------------- সার্চ হ্যান্ডলার (RapidFuzz Optimized) -------------------
+# ------------------- সার্চ হ্যান্ডলার (Ultra Fast & Non-Blocking) -------------------
 @app.on_message(filters.text & (filters.group | filters.private))
 async def search(_, msg: Message):
     query = msg.text.strip()
@@ -461,7 +475,7 @@ async def search(_, msg: Message):
 
     query_clean = clean_text(query)
 
-    # ১. সরাসরি সার্চ (Direct Search) - ডাটাবেস ইন্ডেক্স ব্যবহার করবে
+    # ১. সরাসরি সার্চ (Direct Search) - ডাটাবেস ইন্ডেক্স ব্যবহার করবে (সবচেয়ে ফাস্ট)
     matched_movies_direct = list(movies_col.find(
         {"$or": [
             {"title_clean": {"$regex": f"^{re.escape(query_clean)}", "$options": "i"}},
@@ -477,47 +491,53 @@ async def search(_, msg: Message):
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
         return
 
-    # ২. Spelling Checker (RapidFuzz Optimized)
-    loading_message = await msg.reply("🔎 Searching...", quote=True)
-    
-    # ক্যাশ থেকে টাইটেল নেওয়া (DB কল কমাবে)
-    # Thread Pool ব্যবহার করা হচ্ছে যাতে মেইন লুপ ব্লক না হয়
-    loop = asyncio.get_running_loop()
-    all_titles = await loop.run_in_executor(thread_pool_executor, get_cached_titles)
+    # ২. Spelling Checker (Ultra Fast Mode)
+    # ক্যাশ থেকে টাইটেল নেওয়া (Non-blocking)
+    all_titles = get_cached_titles()
     
     if not all_titles:
-        await loading_message.delete()
-        await msg.reply("Database is empty or loading!")
+        # যদি ক্যাশ খালি থাকে (অসম্ভব, কারণ স্টার্টআপে লোড হয়), তবে গুগল সার্চ বাটন দেখাবে
+        Google_Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
+        request_button = InlineKeyboardButton("এই মুভির জন্য অনুরোধ করুন", callback_data=f"request_movie_{user_id}_{urllib.parse.quote_plus(query)}")
+        google_button_row = [InlineKeyboardButton("গুগলে সার্চ করুন", url=Google_Search_url)]
+        reply_markup = InlineKeyboardMarkup([google_button_row, [request_button]])
+        await msg.reply_text(
+            "❌ দুঃখিত! মুভিটি খুঁজে পাওয়া যায়নি।\n(ডাটাবেস লোড হচ্ছে, কিছুক্ষণ পর আবার চেষ্টা করুন)",
+            reply_markup=reply_markup, quote=True
+        )
         return
 
-    # RapidFuzz দিয়ে দ্রুত ম্যাচিং
-    matches = await loop.run_in_executor(
-        thread_pool_executor,
-        process.extract,
-        query,
-        all_titles,
-        5, # limit
-        fuzz.WRatio # scorer
-    )
-    
+    loading_message = await msg.reply("🔎 Searching...", quote=True)
+
+    try:
+        # RapidFuzz এক্সট্রাকশন (থ্রেডে রান হবে যেন বট হ্যাং না করে)
+        loop = asyncio.get_running_loop()
+        matches = await loop.run_in_executor(
+            thread_pool_executor,
+            process.extract,
+            query,
+            all_titles,
+            dict(limit=5, score_cutoff=60, scorer=fuzz.WRatio)
+        )
+    except Exception as e:
+        print(f"Fuzzy Error: {e}")
+        matches = []
+
     await loading_message.delete()
     
     suggestion_buttons = []
     
-    # বাটন তৈরি (High accuracy filter: স্কোর ৬০ এর নিচে হলে দেখাবে না)
-    # rapidfuzz returns (match, score, index) usually
+    # রেজাল্ট প্রসেসিং
     for match_tuple in matches:
         name = match_tuple[0]
-        score = match_tuple[1]
-        
-        if score > 60:
-            cb_data = f"fixsearch_{name}"[:60]
-            suggestion_buttons.append([InlineKeyboardButton(text=f"{name}", callback_data=cb_data)])
+        # বাটন ডাটা লিমিট ক্রস যাতে না করে
+        cb_data = f"fixsearch_{name}"[:60]
+        suggestion_buttons.append([InlineKeyboardButton(text=f"{name}", callback_data=cb_data)])
 
     if suggestion_buttons:
         suggestion_buttons.append([InlineKeyboardButton("🚫 CLOSE 🚫", callback_data="close_data")])
         text_message = (
-            "‼️ **BANAN VUL HOYECHE!**\n"
+            "‼️ **SPELLING MISTAKE BRO!**\n"
             "😍 **Does not match perfectly. Did you mean one of these?** 👇\n\n"
             "<blockquote>👇 নিচে দেওয়া বিকল্পগুলি থেকে সঠিক মুভিটি বেছে নিন</blockquote>"
         )
@@ -525,6 +545,7 @@ async def search(_, msg: Message):
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
 
     else:
+        # কিছুই না পাওয়া গেলে গুগল সার্চ
         Google_Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
         request_button = InlineKeyboardButton("এই মুভির জন্য অনুরোধ করুন", callback_data=f"request_movie_{user_id}_{urllib.parse.quote_plus(query)}")
         google_button_row = [InlineKeyboardButton("গুগলে সার্চ করুন", url=Google_Search_url)]
@@ -630,5 +651,10 @@ async def callback_handler(_, cq: CallbackQuery):
         else: await cq.answer()
 
 if __name__ == "__main__":
-    print("বট চালু হচ্ছে (RapidFuzz Enabled)...")
+    print("🚀 বট চালু হচ্ছে...")
+    try:
+        print("⏳ Loading movie titles into memory (Please wait)...")
+        update_cache_in_background()
+    except Exception as e:
+        print(f"Startup Cache Error: {e}")
     app.run()
