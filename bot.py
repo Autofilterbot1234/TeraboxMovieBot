@@ -524,7 +524,7 @@ async def request_movie(_, msg: Message):
         except Exception:
             pass
 
-# ------------------- সার্চ হ্যান্ডলার (আপডেটেড) -------------------
+# ------------------- স্মার্ট সার্চ হ্যান্ডলার (ফাইনাল) -------------------
 @app.on_message(filters.text & (filters.group | filters.private))
 async def search(_, msg: Message):
     query = msg.text.strip()
@@ -543,9 +543,16 @@ async def search(_, msg: Message):
     )
 
     loading_message = await msg.reply("🔎 লোড হচ্ছে...", quote=True)
-    query_clean = clean_text(query)
+    
+    # ১. সাল (Year) আলাদা করা
+    # ইনপুট: "Farzi 2023" -> সাল: 2023, নাম: Farzi
+    query_title_only = re.sub(r'\b(19|20)\d{2}\b', '', query).strip()
+    if not query_title_only:
+        query_title_only = query # শুধু সাল দিলে সেটাই সার্চ হবে
 
-    # 1. Exact Match (হুবহু মিল)
+    query_clean = clean_text(query_title_only)
+
+    # ২. Exact Match (হুবহু মিল - সাল ছাড়া)
     exact_match = list(movies_col.find({"title_clean": query_clean}).limit(RESULTS_COUNT))
     if exact_match:
         await loading_message.delete()
@@ -561,7 +568,8 @@ async def search(_, msg: Message):
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
         return
 
-    # 2. Starts With (শুরুতে মিল)
+    # ৩. Starts With (শুরুতে মিল - স্মার্ট)
+    # ইনপুট "Farzi 2023" -> সাল বাদ দিয়ে "Farzi" -> ডাটাবেজে "Farzi Season 1..." (MATCH)
     starts_with_match = list(movies_col.find({
         "title_clean": {"$regex": f"^{re.escape(query_clean)}", "$options": "i"}
     }).limit(RESULTS_COUNT))
@@ -580,7 +588,8 @@ async def search(_, msg: Message):
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
         return
 
-    # 3. Fuzzy Search (বানান ভুল থাকলে)
+    # ৪. Fuzzy Search (ভুল বানানের জন্য)
+    # উপরের দুটো না পেলে কেবল তখনই এখানে আসবে
     all_movie_data_cursor = movies_col.find(
         {}, 
         {"title_clean": 1, "original_title": "$title", "message_id": 1, "language": 1, "views_count": 1}
