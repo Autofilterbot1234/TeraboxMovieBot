@@ -442,28 +442,45 @@ async def delete_all_movies_command(_, msg: Message):
     reply_msg = await msg.reply("আপনি কি নিশ্চিত যে আপনি ডাটাবেস থেকে **সব মুভি** ডিলিট করতে চান? এই প্রক্রিয়াটি অপরিবর্তনীয়!", reply_markup=confirmation_button)
     asyncio.create_task(delete_message_later(reply_msg.chat.id, reply_msg.id))
 
-@app.on_callback_query(filters.regex(r"^noresult_(wrong|notyet|uploaded|coming)_(\d+)_([^ ]+)$") & filters.user(ADMIN_IDS))
+# ------------------- অ্যাডমিন রিপ্লাই হ্যান্ডলার (আপডেটেড ও স্মার্ট) -------------------
+@app.on_callback_query(filters.regex(r"^noresult_(wrong|notyet|uploaded|coming|unreleased|processing)_(\d+)_([^ ]+)$") & filters.user(ADMIN_IDS))
 async def handle_admin_reply(_, cq: CallbackQuery):
     parts = cq.data.split("_", 3)
     reason = parts[1]
     user_id = int(parts[2])
     encoded_query = parts[3]
     original_query = urllib.parse.unquote_plus(encoded_query)
+
+    # স্মার্ট মেসেজ লিস্ট
     messages = {
-        "wrong": f"❌ আপনি **'{original_query}'** নামে ভুল সার্চ করেছেন। অনুগ্রহ করে সঠিক নাম লিখে আবার চেষ্টা করুন।",
-        "notyet": f"⏳ **'{original_query}'** মুভিটি এখনো আমাদের কাছে আসেনি। অনুগ্রহ করে কিছু সময় পর আবার চেষ্টা করুন।",
-        "uploaded": f"📤 **'{original_query}'** মুভিটি ইতিমধ্যে আপলোড করা হয়েছে। সঠিক নামে আবার সার্চ করুন।",
-        "coming": f"🚀 **'{original_query}'** মুভিটি খুব শিগগিরই আমাদের চ্যানেলে আসবে। অনুগ্রহ করে অপেক্ষা করুন."
+        "wrong": f"❌ **দুঃখিত! নামটিতে ভুল আছে।**\n\nভাইয়া, **'{original_query}'** নামে কোনো মুভি নেই বা বানান ভুল হয়েছে। দয়া করে Google থেকে সঠিক বানানটি দেখে আবার সার্চ করুন।",
+        
+        "unreleased": f"🚫 **অপ্রকাশিত মুভি!**\n\nভাইয়া, **'{original_query}'** মুভিটি এখনো অফিসিয়ালি ডিজিটাল/ওটিটি-তে রিলিজ হয়নি। রিলিজ হওয়ার সাথে সাথেই আমাদের চ্যানেলে পেয়ে যাবেন।",
+        
+        "uploaded": f"✅ **মুভিটি আমাদের কাছে আছে!**\n\nভাইয়া, **'{original_query}'** মুভিটি অলরেডি আপলোড করা আছে। আপনি সম্ভবত ভুল বানানে সার্চ করেছেন। দয়া করে সঠিক বানানে আবার চেষ্টা করুন।",
+        
+        "processing": f"♻️ **কাজ চলছে!**\n\nভাইয়া, **'{original_query}'** মুভিটি নিয়ে আমরা কাজ করছি। কিছুক্ষণের মধ্যেই আপলোড করা হবে। সাথে থাকার জন্য ধন্যবাদ!",
+        
+        "coming": f"🚀 **শীঘ্রই আসবে!**\n\nভাইয়া, **'{original_query}'** মুভিটি খুব শীঘ্রই আমাদের চ্যানেলে আসবে। আমরা এটি সংগ্রহের চেষ্টা করছি। অনুগ্রহ করে অপেক্ষা করুন।",
+        
+        "notyet": f"⏳ **এখনো আসেনি!**\n\n**'{original_query}'** মুভিটি এখনো আমাদের ডাটাবেসে নেই। তবে আমরা এটি নোট করে রেখেছি, শীঘ্রই যুক্ত করা হবে।"
     }
+    
     try:
         m_sent = await app.send_message(user_id, messages[reason])
         asyncio.create_task(delete_message_later(m_sent.chat.id, m_sent.id))
         await cq.answer("ব্যবহারকারীকে জানানো হয়েছে ✅", show_alert=True)
+        # বাটনের টেক্সট আপডেট
+        btn_text = {
+            "wrong": "ভুল নাম ❌", "unreleased": "রিলিজ হয়নি 🚫", 
+            "uploaded": "আপলোড আছে ✅", "processing": "কাজ চলছে ♻️",
+            "coming": "শীঘ্রই আসবে 🚀", "notyet": "এখনো আসেনি ⏳"
+        }
         await cq.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton(f"✅ উত্তর দেওয়া হয়েছে: {messages[reason].split(' ')[0]}", callback_data="noop")
+            InlineKeyboardButton(f"✅ রিপ্লাই দেওয়া হয়েছে: {btn_text.get(reason, 'সম্পন্ন')}", callback_data="noop")
         ]]))
     except Exception:
-        await cq.answer("ব্যবহারকারীকে মেসেজ পাঠানো যায়নি ❌", show_alert=True)
+        await cq.answer("ব্যবহারকারীকে মেসেজ পাঠানো যায়নি (হয়তো ব্লক করেছে) ❌", show_alert=True)
 
 @app.on_message(filters.command("popular") & (filters.private | filters.group))
 async def popular_movies(_, msg: Message):
@@ -545,14 +562,13 @@ async def search(_, msg: Message):
     loading_message = await msg.reply("🔎 লোড হচ্ছে...", quote=True)
     
     # ১. সাল (Year) আলাদা করা
-    # ইনপুট: "Farzi 2023" -> সাল: 2023, নাম: Farzi
     query_title_only = re.sub(r'\b(19|20)\d{2}\b', '', query).strip()
     if not query_title_only:
-        query_title_only = query # শুধু সাল দিলে সেটাই সার্চ হবে
+        query_title_only = query 
 
     query_clean = clean_text(query_title_only)
 
-    # ২. Exact Match (হুবহু মিল - সাল ছাড়া)
+    # ২. Exact Match
     exact_match = list(movies_col.find({"title_clean": query_clean}).limit(RESULTS_COUNT))
     if exact_match:
         await loading_message.delete()
@@ -568,8 +584,7 @@ async def search(_, msg: Message):
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
         return
 
-    # ৩. Starts With (শুরুতে মিল - স্মার্ট)
-    # ইনপুট "Farzi 2023" -> সাল বাদ দিয়ে "Farzi" -> ডাটাবেজে "Farzi Season 1..." (MATCH)
+    # ৩. Starts With
     starts_with_match = list(movies_col.find({
         "title_clean": {"$regex": f"^{re.escape(query_clean)}", "$options": "i"}
     }).limit(RESULTS_COUNT))
@@ -588,8 +603,7 @@ async def search(_, msg: Message):
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
         return
 
-    # ৪. Fuzzy Search (ভুল বানানের জন্য)
-    # উপরের দুটো না পেলে কেবল তখনই এখানে আসবে
+    # ৪. Fuzzy Search
     all_movie_data_cursor = movies_col.find(
         {}, 
         {"title_clean": 1, "original_title": "$title", "message_id": 1, "language": 1, "views_count": 1}
@@ -623,6 +637,7 @@ async def search(_, msg: Message):
         m = await msg.reply("🔍 সরাসরি কোনো মুভি পাওয়া যায়নি, তবে কাছাকাছি কিছু নাম পাওয়া গেছে:", reply_markup=InlineKeyboardMarkup(buttons), quote=True)
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
     else:
+        # কিছুই না পাওয়া গেলে (এডমিন নোটিফিকেশন + গুগল বাটন)
         Google_Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
         request_button = InlineKeyboardButton("এই মুভির জন্য অনুরোধ করুন", callback_data=f"request_movie_{user_id}_{urllib.parse.quote_plus(query)}")
         google_button_row = [InlineKeyboardButton("গুগলে সার্চ করুন", url=Google_Search_url)]
@@ -638,14 +653,25 @@ async def search(_, msg: Message):
             quote=True
         )
         asyncio.create_task(delete_message_later(alert.chat.id, alert.id))
+        
         encoded_query = urllib.parse.quote_plus(query)
-        admin_btns = InlineKeyboardMarkup([[
-            InlineKeyboardButton("❌ ভুল নাম", callback_data=f"noresult_wrong_{user_id}_{encoded_query}"),
-            InlineKeyboardButton("⏳ এখনো আসেনি", callback_data=f"noresult_notyet_{user_id}_{encoded_query}")
-        ], [
-            InlineKeyboardButton("📤 আপলোড আছে", callback_data=f"noresult_uploaded_{user_id}_{encoded_query}"),
-            InlineKeyboardButton("🚀 শিগগির আসবে", callback_data=f"noresult_coming_{user_id}_{encoded_query}")
-        ]])
+        
+        # --- নতুন আপডেটেড বাটন (স্মার্ট অপশন) ---
+        admin_btns = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("❌ ভুল নাম", callback_data=f"noresult_wrong_{user_id}_{encoded_query}"),
+                InlineKeyboardButton("🚫 রিলিজ হয়নি", callback_data=f"noresult_unreleased_{user_id}_{encoded_query}")
+            ],
+            [
+                InlineKeyboardButton("📤 আপলোড আছে", callback_data=f"noresult_uploaded_{user_id}_{encoded_query}"),
+                InlineKeyboardButton("♻️ কাজ চলছে", callback_data=f"noresult_processing_{user_id}_{encoded_query}")
+            ],
+            [
+                InlineKeyboardButton("🚀 শীঘ্রই আসবে", callback_data=f"noresult_coming_{user_id}_{encoded_query}"),
+                InlineKeyboardButton("⏳ এখনো আসেনি", callback_data=f"noresult_notyet_{user_id}_{encoded_query}")
+            ]
+        ])
+        
         for admin_id in ADMIN_IDS:
             try:
                 await app.send_message(
@@ -771,29 +797,8 @@ async def callback_handler(_, cq: CallbackQuery):
             pass
 
     elif "_" in data:
-        parts = data.split("_", 3)
-        if len(parts) == 4 and parts[0] in ["noresult"]: 
-             pass
-        elif len(parts) == 4 and parts[0] in ["has", "no", "soon", "wrong"]:
-            action, uid, mid, raw_query = parts
-            uid = int(uid)
-            responses = {
-                "has": f"✅ @{cq.from_user.username or cq.from_user.first_name} জানিয়েছেন যে **{raw_query}** মুভিটি ডাটাবেজে আছে।",
-                "no": f"❌ @{cq.from_user.username or cq.from_user.first_name} জানিয়েছেন যে **{raw_query}** মুভিটি ডাটাবেজে নেই।",
-                "soon": f"⏳ @{cq.from_user.username or cq.from_user.first_name} জানিয়েছেন যে **{raw_query}** মুভিটি শীঘ্রই আসবে।",
-                "wrong": f"✏️ @{cq.from_user.username or cq.from_user.first_name} বলছেন যে আপনি ভুল নাম লিখেছেন: **{raw_query}**।"
-            }
-            if action in responses:
-                try:
-                    m = await app.send_message(uid, responses[action])
-                    asyncio.create_task(delete_message_later(m.chat.id, m.id))
-                    await cq.answer("অ্যাডমিনের পক্ষ থেকে উত্তর পাঠানো হয়েছে।")
-                except Exception:
-                    await cq.answer("ইউজারকে বার্তা পাঠাতে সমস্যা হয়েছে।", show_alert=True)
-            else:
-                await cq.answer("অকার্যকর কলব্যাক ডেটা।", show_alert=True)
-        else:
-            await cq.answer()
+        # পুরনো কোনো হ্যান্ডলার থাকলে ইগনোর করবে, নতুনটা উপরে হ্যান্ডেল করা হয়েছে
+        await cq.answer()
 
 if __name__ == "__main__":
     print("বট শুরু হচ্ছে...")
