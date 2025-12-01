@@ -14,6 +14,8 @@ from flask import Flask
 from threading import Thread
 import os
 import re
+import time
+import math
 from datetime import datetime, UTC, timedelta 
 import asyncio
 import urllib.parse
@@ -30,6 +32,8 @@ ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(",")))
 DATABASE_URL = os.getenv("DATABASE_URL")
 UPDATE_CHANNEL = os.getenv("UPDATE_CHANNEL", "https://t.me/CTGMovieOfficial")
 START_PIC = os.getenv("START_PIC", "https://i.ibb.co/prnGXMr3/photo-2025-05-16-05-15-45-7504908428624527364.jpg")
+# ব্রডকাস্ট স্ট্যাটাসের ডিফল্ট ছবি
+BROADCAST_PIC = os.getenv("BROADCAST_PIC", "https://telegra.ph/file/18659550b694b47000787.jpg")
 
 app = Client("movie_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -86,7 +90,12 @@ def extract_year(text):
     match = re.search(r'\b(19|20)\d{2}\b', text)
     return int(match.group(0)) if match else None
 
-async def delete_message_later(chat_id, message_id, delay=43200): # 12 ঘন্টা পর ডিলিট
+def get_readable_time(seconds):
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+    return f"{int(h):02d}:{int(m):02d}:{int(s):02d}"
+
+async def delete_message_later(chat_id, message_id, delay=43200): 
     await asyncio.sleep(delay)
     try:
         await app.delete_messages(chat_id, message_id)
@@ -96,10 +105,8 @@ async def delete_message_later(chat_id, message_id, delay=43200): # 12 ঘন্
 def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=70, limit=5):
     if not all_movie_titles_data:
         return []
-
     choices = [item["title_clean"] for item in all_movie_titles_data]
     matches_raw = process.extract(query_clean, choices, limit=limit)
-
     corrected_suggestions = []
     for matched_clean_title, score in matches_raw:
         if score >= score_cutoff:
@@ -114,60 +121,126 @@ def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=70, 
                     break
     return corrected_suggestions
 
-# ------------------- ফাস্ট ব্রডকাস্ট ওয়ার্কার -------------------
-async def broadcast_movie_worker(movie_title, message_id, thumbnail_id=None):
+# ------------------- অ্যাডভান্সড ব্রডকাস্ট ইঞ্জিন -------------------
+async def broadcast_messages(user_ids, message_func, status_msg=None, total_users=0):
+    success = 0
+    failed = 0
+    blocked = 0
+    start_time = time.time()
+    
+    # কনকারেন্সি লিমিট (একসাথে ২০টি থ্রেড)
+    sem = asyncio.Semaphore(20)
+
+    async def send_worker(user_id):
+        nonlocal success, failed, blocked
+        async with sem:
+            try:
+                await message_func(user_id)
+                success += 1
+            except FloodWait as e:
+                await asyncio.sleep(e.value)
+                try:
+                    await message_func(user_id)
+                    success += 1
+                except Exception:
+                    failed += 1
+            except (InputUserDeactivated, UserIsBlocked, PeerIdInvalid):
+                users_col.delete_one({"_id": user_id})
+                blocked += 1
+                failed += 1
+            except Exception:
+                failed += 1
+
+    # প্রোগ্রেস আপডেট লুপ (ব্যাকগ্রাউন্ডে চলবে)
+    async def update_status_loop():
+        while True:
+            await asyncio.sleep(5) # প্রতি ৫ সেকেন্ডে আপডেট
+            done = success + failed
+            if done >= total_users:
+                break
+            
+            if status_msg:
+                elapsed = time.time() - start_time
+                speed = done / elapsed if elapsed > 0 else 0
+                eta = (total_users - done) / speed if speed > 0 else 0
+                percentage = (done / total_users) * 100
+                progress_bar = f"[{'■' * int(percentage // 10)}{'□' * (10 - int(percentage // 10))}]"
+                
+                text = (
+                    f"🚀 **ব্রডকাস্ট চলছে...**\n\n"
+                    f"{progress_bar} **{percentage:.1f}%**\n\n"
+                    f"✅ সফল: `{success}`\n"
+                    f"❌ ব্যর্থ/ব্লক: `{failed}`\n"
+                    f"👥 মোট: `{total_users}`\n"
+                    f"⏱ সময় অতিক্রান্ত: `{get_readable_time(elapsed)}`\n"
+                    f"⏳ আনুমানিক বাকি: `{get_readable_time(eta)}`"
+                )
+                try:
+                    await status_msg.edit_caption(text)
+                except Exception:
+                    pass
+
+    # টাস্ক শুরু
+    updater_task = asyncio.create_task(update_status_loop())
+    await asyncio.gather(*[send_worker(uid) for uid in user_ids])
+    updater_task.cancel()
+
+    # ফাইনাল রিপোর্ট
+    elapsed = time.time() - start_time
+    final_text = (
+        f"✅ **ব্রডকাস্ট সম্পন্ন হয়েছে!**\n\n"
+        f"✅ মোট পাঠানো হয়েছে: `{success}`\n"
+        f"❌ ব্যর্থ হয়েছে: `{failed}` (ব্লক: {blocked})\n"
+        f"⏱ মোট সময় লেগেছে: `{get_readable_time(elapsed)}`"
+    )
+    if status_msg:
+        try:
+            await status_msg.edit_caption(final_text)
+        except Exception:
+            pass
+    return success, failed
+
+# ------------------- মুভি অটো-ব্রডকাস্ট ফাংশন -------------------
+async def auto_broadcast_worker(movie_title, message_id, thumbnail_id=None):
+    # ডাউনলোড বাটন তৈরি
     download_button = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "ডাউনলোড লিংক", 
-                url=f"https://t.me/{app.me.username}?start=watch_{message_id}" 
-            )
-        ]
+        [InlineKeyboardButton("ডাউনলোড লিংক", url=f"https://t.me/{app.me.username}?start=watch_{message_id}")]
     ])
     
     notification_caption = f"🎬 **নতুন মুভি আপলোড হয়েছে!**\n\n**{movie_title}**\n\nএখনই ডাউনলোড করুন!"
     
-    # নোটিফিকেশন অন আছে এমন ইউজারদের লিস্ট
-    all_users = users_col.find({"notify": {"$ne": False}}, {"_id": 1})
-    
-    # একসাথে ২০ জনকে রিকোয়েস্ট পাঠাবে (ফাস্ট হওয়ার মূল কারণ)
-    sem = asyncio.Semaphore(20) 
+    # ইউজার লিস্ট সংগ্রহ
+    all_users_cursor = users_col.find({"notify": {"$ne": False}}, {"_id": 1})
+    all_user_ids = [user["_id"] for user in all_users_cursor]
+    total_users = len(all_user_ids)
 
-    async def send_message_to_user(user):
-        async with sem:
-            user_id = user["_id"]
-            try:
-                if thumbnail_id:
-                    await app.send_photo(
-                        user_id,
-                        photo=thumbnail_id,
-                        caption=notification_caption,
-                        reply_markup=download_button
-                    )
-                else:
-                    await app.send_message(
-                        user_id,
-                        notification_caption,
-                        reply_markup=download_button
-                    )
-            except FloodWait as e:
-                await asyncio.sleep(e.value)
-                try:
-                    if thumbnail_id:
-                        await app.send_photo(user_id, photo=thumbnail_id, caption=notification_caption, reply_markup=download_button)
-                    else:
-                        await app.send_message(user_id, notification_caption, reply_markup=download_button)
-                except Exception:
-                    pass
-            except (InputUserDeactivated, UserIsBlocked, PeerIdInvalid):
-                # ইনএক্টিভ ইউজার ডিলিট করে ডাটাবেস ক্লিন রাখবে
-                users_col.delete_one({"_id": user_id})
-            except Exception:
-                pass
+    if total_users == 0:
+        return
 
-    tasks = [send_message_to_user(user) for user in all_users]
-    if tasks:
-        await asyncio.gather(*tasks)
+    # এডমিনকে স্ট্যাটাস মেসেজ পাঠানো
+    status_msg = None
+    for admin_id in ADMIN_IDS:
+        try:
+            # যদি মুভির থাম্বনেইল থাকে সেটা ব্যবহার করবে, না থাকলে ডিফল্ট
+            pic_to_use = thumbnail_id if thumbnail_id else BROADCAST_PIC
+            status_msg = await app.send_photo(
+                admin_id, 
+                photo=pic_to_use,
+                caption=f"🚀 **নতুন মুভির নোটিফিকেশন শুরু হচ্ছে...**\n👥 মোট ইউজার: `{total_users}`"
+            )
+            break # শুধু প্রথম এডমিনকে দেখাবে (স্প্যাম এড়াতে)
+        except Exception:
+            pass
+
+    # সেন্ডিং ফাংশন ডিফাইন করা
+    async def send_func(user_id):
+        if thumbnail_id:
+            await app.send_photo(user_id, photo=thumbnail_id, caption=notification_caption, reply_markup=download_button)
+        else:
+            await app.send_message(user_id, notification_caption, reply_markup=download_button)
+
+    # মেইন ব্রডকাস্ট কল করা
+    await broadcast_messages(all_user_ids, send_func, status_msg, total_users)
 
 # ------------------- চ্যানেল পোস্ট হ্যান্ডলার -------------------
 @app.on_message(filters.chat(CHANNEL_ID))
@@ -184,7 +257,6 @@ async def save_post(_, msg: Message):
 
     movie_title = text.splitlines()[0]
     
-    # লাইক/ডিসলাইক ফিল্ড সরানো হয়েছে
     movie_to_save = {
         "message_id": msg.id,
         "title": movie_title, 
@@ -202,9 +274,8 @@ async def save_post(_, msg: Message):
     if result.upserted_id is not None:
         setting = settings_col.find_one({"key": "global_notify"})
         if setting and setting.get("value"):
-            # ব্যাকগ্রাউন্ডে ব্রডকাস্ট চালু হবে, তাই বোট স্লো হবে না
-            asyncio.create_task(broadcast_movie_worker(movie_title, msg.id, thumbnail_file_id))
-            print(f"Broadcast started for: {movie_title}")
+            # ব্যাকগ্রাউন্ড টাস্ক হিসেবে ফাস্ট ব্রডকাস্ট রান হবে
+            asyncio.create_task(auto_broadcast_worker(movie_title, msg.id, thumbnail_file_id))
 
 # ------------------- স্টার্ট (Start) কমান্ড -------------------
 user_last_start_time = {}
@@ -223,7 +294,6 @@ async def start(_, msg: Message):
 
     if len(msg.command) > 1 and msg.command[1].startswith("watch_"):
         message_id = int(msg.command[1].replace("watch_", ""))
-        
         protect_setting = settings_col.find_one({"key": "protect_forwarding"})
         should_protect = protect_setting.get("value", True) if protect_setting else True
 
@@ -237,13 +307,9 @@ async def start(_, msg: Message):
             
             movie_data = movies_col.find_one({"message_id": message_id})
             if movie_data:
-                # শুধুমাত্র রিপোর্ট বাটন রাখা হয়েছে
                 action_buttons = InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton("⚠️ রিপোর্ট / সমস্যা (Report)", callback_data=f"report_{message_id}")
-                    ]
+                    [InlineKeyboardButton("⚠️ রিপোর্ট / সমস্যা (Report)", callback_data=f"report_{message_id}")]
                 ])
-                
                 report_message = await app.send_message(
                     chat_id=msg.chat.id,
                     text="লিংক কাজ না করলে নিচের বাটনে রিপোর্ট করুন:",
@@ -257,8 +323,7 @@ async def start(_, msg: Message):
                 {"message_id": message_id},
                 {"$inc": {"views_count": 1}}
             )
-
-        except Exception as e:
+        except Exception:
             error_msg = await msg.reply_text("মুভিটি খুঁজে পাওয়া যায়নি বা লোড করা যায়নি।")
             asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
         return 
@@ -283,7 +348,39 @@ Channel: [All Bot Update My](https://t.me/AllBotUpdatemy)""",
     )
     asyncio.create_task(delete_message_later(start_message.chat.id, start_message.id))
 
-# ------------------- ফিডব্যাক ও অন্যান্য কমান্ড -------------------
+# ------------------- ম্যানুয়াল ব্রডকাস্ট কমান্ড (আপডেটেড) -------------------
+@app.on_message(filters.command("broadcast") & filters.user(ADMIN_IDS))
+async def broadcast(_, msg: Message):
+    if not msg.reply_to_message and len(msg.command) < 2:
+        await msg.reply("ব্যবহার: কোনো ফটো বা টেক্সটে রিপ্লাই দিয়ে `/broadcast` লিখুন, অথবা `/broadcast <মেসেজ>` লিখুন।")
+        return
+
+    # ইউজার লোড করা
+    all_users_cursor = users_col.find({}, {"_id": 1})
+    all_user_ids = [user["_id"] for user in all_users_cursor]
+    total_users = len(all_user_ids)
+    
+    if total_users == 0:
+        await msg.reply("ডাটাবেসে কোনো ইউজার নেই।")
+        return
+
+    # স্ট্যাটাস মেসেজ পাঠানো
+    status_msg = await msg.reply_photo(
+        photo=BROADCAST_PIC,
+        caption=f"🚀 **ম্যানুয়াল ব্রডকাস্ট শুরু হচ্ছে...**\n👥 মোট টার্গেট: `{total_users}`"
+    )
+
+    # সেন্ডিং লজিক
+    async def send_func(user_id):
+        if msg.reply_to_message:
+            await msg.reply_to_message.copy(user_id)
+        else:
+            await app.send_message(user_id, msg.text.split(None, 1)[1])
+
+    # ব্রডকাস্ট শুরু
+    await broadcast_messages(all_user_ids, send_func, status_msg, total_users)
+
+# ------------------- অন্যান্য কমান্ড ও হ্যান্ডলার -------------------
 @app.on_message(filters.command("feedback") & filters.private)
 async def feedback(_, msg: Message):
     if len(msg.command) < 2:
@@ -297,25 +394,6 @@ async def feedback(_, msg: Message):
     })
     m = await msg.reply("আপনার মতামতের জন্য ধন্যবাদ!")
     asyncio.create_task(delete_message_later(m.chat.id, m.id))
-
-@app.on_message(filters.command("broadcast") & filters.user(ADMIN_IDS))
-async def broadcast(_, msg: Message):
-    if len(msg.command) < 2:
-        error_msg = await msg.reply("ব্যবহার: /broadcast আপনার মেসেজ এখানে")
-        asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
-        return
-    count = 0
-    message_to_send = msg.text.split(None, 1)[1]
-    # ম্যানুয়াল ব্রডকাস্ট সাধারণ রাখা হয়েছে যাতে কাস্টম মেসেজ পাঠাতে সমস্যা না হয়
-    for user in users_col.find():
-        try:
-            await app.send_message(user["_id"], message_to_send)
-            count += 1
-            await asyncio.sleep(0.05)
-        except Exception:
-            pass
-    reply_msg = await msg.reply(f"{count} জন ব্যবহারকারীর কাছে ব্রডকাস্ট পাঠানো হয়েছে।")
-    asyncio.create_task(delete_message_later(reply_msg.chat.id, reply_msg.id))
 
 @app.on_message(filters.command("stats") & filters.user(ADMIN_IDS))
 async def stats(_, msg: Message):
@@ -428,11 +506,7 @@ async def popular_movies(_, msg: Message):
                     )
                 ])
         reply_markup = InlineKeyboardMarkup(buttons)
-        m = await msg.reply_text(
-            "🔥 বর্তমানে সবচেয়ে জনপ্রিয় মুভিগুলো:\n\n",
-            reply_markup=reply_markup,
-            quote=True
-        )
+        m = await msg.reply_text("🔥 বর্তমানে সবচেয়ে জনপ্রিয় মুভিগুলো:\n\n", reply_markup=reply_markup, quote=True)
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
     else:
         m = await msg.reply_text("দুঃখিত, বর্তমানে কোনো জনপ্রিয় মুভি পাওয়া যায়নি।", quote=True)
@@ -456,7 +530,6 @@ async def request_movie(_, msg: Message):
     })
     m = await msg.reply(f"আপনার অনুরোধ **'{movie_name}'** সফলভাবে জমা দেওয়া হয়েছে। এডমিনরা এটি পর্যালোচনা করবেন।", quote=True)
     asyncio.create_task(delete_message_later(m.chat.id, m.id))
-
     encoded_movie_name = urllib.parse.quote_plus(movie_name)
     admin_request_btns = InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ সম্পন্ন হয়েছে", callback_data=f"req_fulfilled_{user_id}_{encoded_movie_name}"),
@@ -567,7 +640,6 @@ async def search(_, msg: Message):
             quote=True
         )
         asyncio.create_task(delete_message_later(alert.chat.id, alert.id))
-
         encoded_query = urllib.parse.quote_plus(query)
         admin_btns = InlineKeyboardMarkup([[
             InlineKeyboardButton("❌ ভুল নাম", callback_data=f"noresult_wrong_{user_id}_{encoded_query}"),
