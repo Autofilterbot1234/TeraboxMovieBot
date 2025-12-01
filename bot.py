@@ -23,16 +23,18 @@ from fuzzywuzzy import process
 from concurrent.futures import ThreadPoolExecutor
 
 # ------------------- কনফিগারেশন -------------------
+# এই ভেরিয়েবলগুলো আপনার সার্ভারের Environment Variables এ সেট করুন
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 RESULTS_COUNT = int(os.getenv("RESULTS_COUNT", 10))
+# এডমিন আইডি কমা (,) দিয়ে আলাদা করে লিখবেন। যেমন: 123456,789012
 ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(",")))
 DATABASE_URL = os.getenv("DATABASE_URL")
 UPDATE_CHANNEL = os.getenv("UPDATE_CHANNEL", "https://t.me/CTGMovieOfficial")
 START_PIC = os.getenv("START_PIC", "https://i.ibb.co/prnGXMr3/photo-2025-05-16-05-15-45-7504908428624527364.jpg")
-# ব্রডকাস্ট স্ট্যাটাসের ডিফল্ট ছবি
+# ব্রডকাস্ট স্ট্যাটাসের ছবি (যদি লিংক কাজ না করে তবে টেক্সট দেখাবে)
 BROADCAST_PIC = os.getenv("BROADCAST_PIC", "https://telegra.ph/file/18659550b694b47000787.jpg")
 
 app = Client("movie_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
@@ -47,7 +49,7 @@ users_col = db["users"]
 settings_col = db["settings"]
 requests_col = db["requests"]
 
-# ইনডেক্সিং
+# ইনডেক্সিং (দ্রুত সার্চের জন্য)
 try:
     movies_col.drop_index("message_id_1")
 except Exception:
@@ -95,7 +97,7 @@ def get_readable_time(seconds):
     h, m = divmod(m, 60)
     return f"{int(h):02d}:{int(m):02d}:{int(s):02d}"
 
-async def delete_message_later(chat_id, message_id, delay=43200): 
+async def delete_message_later(chat_id, message_id, delay=43200): # 12 ঘন্টা
     await asyncio.sleep(delay)
     try:
         await app.delete_messages(chat_id, message_id)
@@ -128,7 +130,7 @@ async def broadcast_messages(user_ids, message_func, status_msg=None, total_user
     blocked = 0
     start_time = time.time()
     
-    # কনকারেন্সি লিমিট (একসাথে ২০টি থ্রেড)
+    # একসাথে ২০টি মেসেজ পাঠানোর কনকারেন্সি
     sem = asyncio.Semaphore(20)
 
     async def send_worker(user_id):
@@ -145,23 +147,25 @@ async def broadcast_messages(user_ids, message_func, status_msg=None, total_user
                 except Exception:
                     failed += 1
             except (InputUserDeactivated, UserIsBlocked, PeerIdInvalid):
+                # ইউজার যদি ব্লক করে দেয়, ডাটাবেস থেকে ডিলিট হবে
                 users_col.delete_one({"_id": user_id})
                 blocked += 1
                 failed += 1
             except Exception:
                 failed += 1
 
-    # প্রোগ্রেস আপডেট লুপ (ব্যাকগ্রাউন্ডে চলবে)
+    # লাইভ প্রোগ্রেস আপডেট লুপ
     async def update_status_loop():
         while True:
-            await asyncio.sleep(5) # প্রতি ৫ সেকেন্ডে আপডেট
+            await asyncio.sleep(5) # প্রতি ৫ সেকেন্ডে আপডেট হবে
             done = success + failed
             if done >= total_users:
                 break
             
             if status_msg:
                 elapsed = time.time() - start_time
-                speed = done / elapsed if elapsed > 0 else 0
+                if elapsed == 0: elapsed = 1
+                speed = done / elapsed
                 eta = (total_users - done) / speed if speed > 0 else 0
                 percentage = (done / total_users) * 100
                 progress_bar = f"[{'■' * int(percentage // 10)}{'□' * (10 - int(percentage // 10))}]"
@@ -172,15 +176,18 @@ async def broadcast_messages(user_ids, message_func, status_msg=None, total_user
                     f"✅ সফল: `{success}`\n"
                     f"❌ ব্যর্থ/ব্লক: `{failed}`\n"
                     f"👥 মোট: `{total_users}`\n"
-                    f"⏱ সময় অতিক্রান্ত: `{get_readable_time(elapsed)}`\n"
-                    f"⏳ আনুমানিক বাকি: `{get_readable_time(eta)}`"
+                    f"⏱ সময়: `{get_readable_time(elapsed)}`\n"
+                    f"⏳ বাকি সময়: `{get_readable_time(eta)}`"
                 )
                 try:
-                    await status_msg.edit_caption(text)
+                    # ছবি থাকলে ক্যাপশন এডিট, না থাকলে টেক্সট এডিট
+                    if status_msg.photo:
+                        await status_msg.edit_caption(text)
+                    else:
+                        await status_msg.edit_text(text)
                 except Exception:
                     pass
 
-    # টাস্ক শুরু
     updater_task = asyncio.create_task(update_status_loop())
     await asyncio.gather(*[send_worker(uid) for uid in user_ids])
     updater_task.cancel()
@@ -193,53 +200,56 @@ async def broadcast_messages(user_ids, message_func, status_msg=None, total_user
         f"❌ ব্যর্থ হয়েছে: `{failed}` (ব্লক: {blocked})\n"
         f"⏱ মোট সময় লেগেছে: `{get_readable_time(elapsed)}`"
     )
+    
     if status_msg:
         try:
-            await status_msg.edit_caption(final_text)
+            if status_msg.photo:
+                await status_msg.edit_caption(final_text)
+            else:
+                await status_msg.edit_text(final_text)
         except Exception:
             pass
+            
     return success, failed
 
-# ------------------- মুভি অটো-ব্রডকাস্ট ফাংশন -------------------
+# ------------------- অটোমেটিক মুভি ব্রডকাস্ট -------------------
 async def auto_broadcast_worker(movie_title, message_id, thumbnail_id=None):
-    # ডাউনলোড বাটন তৈরি
     download_button = InlineKeyboardMarkup([
         [InlineKeyboardButton("ডাউনলোড লিংক", url=f"https://t.me/{app.me.username}?start=watch_{message_id}")]
     ])
     
     notification_caption = f"🎬 **নতুন মুভি আপলোড হয়েছে!**\n\n**{movie_title}**\n\nএখনই ডাউনলোড করুন!"
     
-    # ইউজার লিস্ট সংগ্রহ
     all_users_cursor = users_col.find({"notify": {"$ne": False}}, {"_id": 1})
     all_user_ids = [user["_id"] for user in all_users_cursor]
     total_users = len(all_user_ids)
 
-    if total_users == 0:
-        return
+    if total_users == 0: return
 
-    # এডমিনকে স্ট্যাটাস মেসেজ পাঠানো
+    # এডমিনকে নোটিফাই করা
     status_msg = None
     for admin_id in ADMIN_IDS:
         try:
-            # যদি মুভির থাম্বনেইল থাকে সেটা ব্যবহার করবে, না থাকলে ডিফল্ট
             pic_to_use = thumbnail_id if thumbnail_id else BROADCAST_PIC
             status_msg = await app.send_photo(
                 admin_id, 
                 photo=pic_to_use,
-                caption=f"🚀 **নতুন মুভির নোটিফিকেশন শুরু হচ্ছে...**\n👥 মোট ইউজার: `{total_users}`"
+                caption=f"🚀 **অটো নোটিফিকেশন শুরু হচ্ছে...**\n👥 মোট ইউজার: `{total_users}`"
             )
-            break # শুধু প্রথম এডমিনকে দেখাবে (স্প্যাম এড়াতে)
+            break
         except Exception:
-            pass
+            try:
+                # ছবি ফেইল করলে টেক্সট
+                status_msg = await app.send_message(admin_id, f"🚀 **অটো নোটিফিকেশন শুরু হচ্ছে...**\n👥 মোট ইউজার: `{total_users}`")
+                break
+            except: pass
 
-    # সেন্ডিং ফাংশন ডিফাইন করা
     async def send_func(user_id):
         if thumbnail_id:
             await app.send_photo(user_id, photo=thumbnail_id, caption=notification_caption, reply_markup=download_button)
         else:
             await app.send_message(user_id, notification_caption, reply_markup=download_button)
 
-    # মেইন ব্রডকাস্ট কল করা
     await broadcast_messages(all_user_ids, send_func, status_msg, total_users)
 
 # ------------------- চ্যানেল পোস্ট হ্যান্ডলার -------------------
@@ -274,7 +284,6 @@ async def save_post(_, msg: Message):
     if result.upserted_id is not None:
         setting = settings_col.find_one({"key": "global_notify"})
         if setting and setting.get("value"):
-            # ব্যাকগ্রাউন্ড টাস্ক হিসেবে ফাস্ট ব্রডকাস্ট রান হবে
             asyncio.create_task(auto_broadcast_worker(movie_title, msg.id, thumbnail_file_id))
 
 # ------------------- স্টার্ট (Start) কমান্ড -------------------
@@ -292,6 +301,7 @@ async def start(_, msg: Message):
 
     user_last_start_time[user_id] = current_time
 
+    # মুভি ডেলিভারি
     if len(msg.command) > 1 and msg.command[1].startswith("watch_"):
         message_id = int(msg.command[1].replace("watch_", ""))
         protect_setting = settings_col.find_one({"key": "protect_forwarding"})
@@ -328,6 +338,7 @@ async def start(_, msg: Message):
             asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
         return 
 
+    # নরমাল স্টার্ট
     users_col.update_one(
         {"_id": msg.from_user.id},
         {"$set": {"joined": datetime.now(UTC), "notify": True}},
@@ -348,14 +359,15 @@ Channel: [All Bot Update My](https://t.me/AllBotUpdatemy)""",
     )
     asyncio.create_task(delete_message_later(start_message.chat.id, start_message.id))
 
-# ------------------- ম্যানুয়াল ব্রডকাস্ট কমান্ড (আপডেটেড) -------------------
+# ------------------- ম্যানুয়াল ব্রডকাস্ট কমান্ড -------------------
 @app.on_message(filters.command("broadcast") & filters.user(ADMIN_IDS))
 async def broadcast(_, msg: Message):
+    # ইনপুট ভ্যালিডেশন
     if not msg.reply_to_message and len(msg.command) < 2:
-        await msg.reply("ব্যবহার: কোনো ফটো বা টেক্সটে রিপ্লাই দিয়ে `/broadcast` লিখুন, অথবা `/broadcast <মেসেজ>` লিখুন।")
+        await msg.reply("ব্যবহার:\n১. কোনো মেসেজে রিপ্লাই দিয়ে `/broadcast` লিখুন।\n২. অথবা `/broadcast আপনার মেসেজ` লিখুন।")
         return
 
-    # ইউজার লোড করা
+    # ইউজার লোড
     all_users_cursor = users_col.find({}, {"_id": 1})
     all_user_ids = [user["_id"] for user in all_users_cursor]
     total_users = len(all_user_ids)
@@ -364,23 +376,28 @@ async def broadcast(_, msg: Message):
         await msg.reply("ডাটাবেসে কোনো ইউজার নেই।")
         return
 
-    # স্ট্যাটাস মেসেজ পাঠানো
-    status_msg = await msg.reply_photo(
-        photo=BROADCAST_PIC,
-        caption=f"🚀 **ম্যানুয়াল ব্রডকাস্ট শুরু হচ্ছে...**\n👥 মোট টার্গেট: `{total_users}`"
-    )
+    # স্ট্যাটাস মেসেজ (Safe Mode)
+    status_msg = None
+    try:
+        status_msg = await msg.reply_photo(
+            photo=BROADCAST_PIC,
+            caption=f"🚀 **ম্যানুয়াল ব্রডকাস্ট শুরু হচ্ছে...**\n👥 মোট টার্গেট: `{total_users}`"
+        )
+    except Exception:
+        # ছবি কাজ না করলে টেক্সট
+        status_msg = await msg.reply(f"🚀 **ম্যানুয়াল ব্রডকাস্ট শুরু হচ্ছে...**\n👥 মোট টার্গেট: `{total_users}`")
 
     # সেন্ডিং লজিক
     async def send_func(user_id):
         if msg.reply_to_message:
             await msg.reply_to_message.copy(user_id)
         else:
-            await app.send_message(user_id, msg.text.split(None, 1)[1])
+            broadcast_text = msg.text.split(None, 1)[1]
+            await app.send_message(user_id, broadcast_text, disable_web_page_preview=True)
 
-    # ব্রডকাস্ট শুরু
     await broadcast_messages(all_user_ids, send_func, status_msg, total_users)
 
-# ------------------- অন্যান্য কমান্ড ও হ্যান্ডলার -------------------
+# ------------------- ফিডব্যাক ও অন্যান্য কমান্ড -------------------
 @app.on_message(filters.command("feedback") & filters.private)
 async def feedback(_, msg: Message):
     if len(msg.command) < 2:
