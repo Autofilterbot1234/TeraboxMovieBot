@@ -2,6 +2,6 @@ pyrogram
 pymongo
 dnspython
 Flask
-RapidFuzz
+fuzzywuzzy
 python-Levenshtein
 tgcrypto
