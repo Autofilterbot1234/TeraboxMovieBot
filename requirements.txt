@@ -1,5 +1,6 @@
 pyrogram
 pymongo
+dnspython
 Flask
 fuzzywuzzy
 python-Levenshtein
