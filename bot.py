@@ -35,8 +35,8 @@ START_PIC = os.getenv("START_PIC", "https://i.ibb.co/prnGXMr3/photo-2025-05-16-0
 BROADCAST_PIC = os.getenv("BROADCAST_PIC", "https://telegra.ph/file/18659550b694b47000787.jpg")
 
 # [CONFIG] অটো মেসেজ সেটিংস
-AUTO_MSG_INTERVAL = 250  # লুপ বিরতি (সেকেন্ডে) - ২০ সেকেন্ড পর পর চেক করবে
-AUTO_MSG_DELETE_TIME = 300 # কতক্ষণ পর মেসেজ ডিলিট হবে (৩০০ সেকেন্ড = ৫ মিনিট)
+AUTO_MSG_INTERVAL = 250  
+AUTO_MSG_DELETE_TIME = 300 
 
 AUTO_MESSAGE_TEXT = """
 **🔔 নিয়মিত আপডেট!**
@@ -58,7 +58,7 @@ stats_col = db["stats"]
 users_col = db["users"]
 settings_col = db["settings"]
 requests_col = db["requests"]
-groups_col = db["groups"]  # গ্রুপ ডাটাবেস
+groups_col = db["groups"]
 
 # ইনডেক্সিং
 try:
@@ -88,7 +88,6 @@ def home():
     return "Bot is running!"
 Thread(target=lambda: flask_app.run(host="0.0.0.0", port=8080)).start() 
 
-# থ্রেড পুল
 thread_pool_executor = ThreadPoolExecutor(max_workers=5)
 
 # ------------------- হেল্পার ফাংশন -------------------
@@ -107,6 +106,19 @@ def get_readable_time(seconds):
     m, s = divmod(seconds, 60)
     h, m = divmod(m, 60)
     return f"{int(h):02d}:{int(m):02d}:{int(s):02d}"
+
+def get_greeting():
+    # বাংলাদেশ সময় অনুযায়ী গ্রীটিং (UTC+6)
+    utc_now = datetime.now(UTC)
+    bd_hour = (utc_now.hour + 6) % 24
+    if 5 <= bd_hour < 12:
+        return "GOOD MORNING ☀️"
+    elif 12 <= bd_hour < 17:
+        return "GOOD AFTERNOON 🌤️"
+    elif 17 <= bd_hour < 21:
+        return "GOOD EVENING 🌇"
+    else:
+        return "GOOD NIGHT 🌙"
 
 async def delete_message_later(chat_id, message_id, delay=300): 
     await asyncio.sleep(delay)
@@ -134,35 +146,24 @@ def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=70, 
                     break
     return corrected_suggestions
 
-# ------------------- অটো গ্রুপ মেসেঞ্জার (ফাইনাল) -------------------
+# ------------------- অটো গ্রুপ মেসেঞ্জার -------------------
 async def auto_group_messenger():
-    print("✅ অটো গ্রুপ মেসেজ সিস্টেম এবং অটো-ডিলিট চালু হয়েছে...")
+    print("✅ অটো গ্রুপ মেসেজ সিস্টেম চালু হয়েছে...")
     while True:
-        # ডাটাবেস থেকে সব গ্রুপ আইডি নেওয়া
         all_groups = groups_col.find({})
-        
         for group in all_groups:
             chat_id = group["_id"]
             try:
-                # ১. মেসেজ পাঠানো
                 sent = await app.send_message(chat_id, AUTO_MESSAGE_TEXT)
-                
-                # ২. মেসেজ ডিলিট টাস্ক (৩০০ সেকেন্ড / ৫ মিনিট পর)
                 if sent:
                     asyncio.create_task(delete_message_later(chat_id, sent.id, delay=AUTO_MSG_DELETE_TIME))
-                
             except FloodWait as e:
                 await asyncio.sleep(e.value)
             except (PeerIdInvalid, UserIsBlocked):
-                # বট গ্রুপ থেকে কিক খেলে ডাটাবেস থেকে রিমুভ হবে
                 groups_col.delete_one({"_id": chat_id})
             except Exception:
                 pass
-            
-            # প্রতিটি গ্রুপে পাঠানোর মাঝে ১.৫ সেকেন্ড গ্যাপ (সেফ থাকার জন্য)
             await asyncio.sleep(1.5) 
-
-        # সব গ্রুপে পাঠানো শেষ হলে ২০ সেকেন্ড অপেক্ষা করে আবার শুরু করবে
         await asyncio.sleep(AUTO_MSG_INTERVAL)
 
 # ------------------- ব্রডকাস্ট ইঞ্জিন -------------------
@@ -277,9 +278,8 @@ async def auto_broadcast_worker(movie_title, message_id, thumbnail_id=None):
             sent_msg = await app.send_photo(user_id, photo=thumbnail_id, caption=notification_caption, reply_markup=download_button)
         else:
             sent_msg = await app.send_message(user_id, notification_caption, reply_markup=download_button)
-        
         if sent_msg:
-            asyncio.create_task(delete_message_later(sent_msg.chat.id, sent_msg.id, delay=86400)) # 24 Hours
+            asyncio.create_task(delete_message_later(sent_msg.chat.id, sent_msg.id, delay=86400))
 
     await broadcast_messages(all_user_ids, send_func, status_msg, total_users)
 
@@ -313,7 +313,6 @@ async def save_post(_, msg: Message):
         if setting and setting.get("value"):
             asyncio.create_task(auto_broadcast_worker(movie_title, msg.id, thumbnail_file_id))
 
-# [FIX] গ্রুপ ট্র্যাকার (গ্রুপে যেকোনো মেসেজ আসলে আইডি সেভ হবে)
 @app.on_message(filters.group, group=10)
 async def log_group(_, msg: Message):
     groups_col.update_one(
@@ -322,19 +321,22 @@ async def log_group(_, msg: Message):
         upsert=True
     )
 
-# ------------------- স্টার্ট কমান্ড -------------------
+# ------------------- স্টার্ট কমান্ড (নতুন ডিজাইন) -------------------
 user_last_start_time = {}
 
 @app.on_message(filters.command("start"))
 async def start(_, msg: Message):
     user_id = msg.from_user.id
     current_time = datetime.now(UTC)
+    
+    # স্প্যাম প্রোটেকশন
     if user_id in user_last_start_time:
         time_since_last_start = current_time - user_last_start_time[user_id]
-        if time_since_last_start < timedelta(seconds=5):
+        if time_since_last_start < timedelta(seconds=2):
             return
     user_last_start_time[user_id] = current_time
 
+    # ১. মুভি ডাউনলোড লিংক হ্যান্ডলিং
     if len(msg.command) > 1 and msg.command[1].startswith("watch_"):
         message_id = int(msg.command[1].replace("watch_", ""))
         protect_setting = settings_col.find_one({"key": "protect_forwarding"})
@@ -368,25 +370,44 @@ async def start(_, msg: Message):
             asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
         return 
 
+    # ২. নরমাল স্টার্ট মেসেজ (আপডেট করা ডিজাইন)
     users_col.update_one(
         {"_id": msg.from_user.id},
         {"$set": {"joined": datetime.now(UTC), "notify": True}},
         upsert=True
     )
+
+    greeting = get_greeting()
+    user_mention = msg.from_user.mention
+    bot_username = app.me.username
+    
+    start_caption = f"""
+HEY {user_mention}, {greeting}
+
+🤖 **I AM {app.me.first_name},** THE MOST
+POWERFUL AUTO FILTER BOT WITH 
+PREMIUM FEATURES.
+"""
+    # বাটন সাজানো
     btns = InlineKeyboardMarkup([
-        [InlineKeyboardButton("আপডেট চ্যানেল", url=UPDATE_CHANNEL)],
-        [InlineKeyboardButton("অ্যাডমিনের সাথে যোগাযোগ", url="https://t.me/ctgmovies23")]
+        [InlineKeyboardButton("🔰 ADD ME TO YOUR GROUP 🔰", url=f"https://t.me/{bot_username}?startgroup=true")],
+        [
+            InlineKeyboardButton("HELP 📢", callback_data="help_menu"),
+            InlineKeyboardButton("ABOUT 📘", callback_data="about_menu")
+        ],
+        [
+            InlineKeyboardButton("TOP SEARCHING ⭐", callback_data="top_searching"),
+            InlineKeyboardButton("UPGRADE 🎟️", url=UPDATE_CHANNEL)
+        ]
     ])
+
     start_message = await msg.reply_photo(
         photo=START_PIC,
-        caption="""আমাকে মুভির নাম লিখে পাঠান, আমি খুঁজে দেবো।
-
-Developed by: **Ctgmovies23**
-Telegram: @ctgmovies23
-Channel: [All Bot Update My](https://t.me/AllBotUpdatemy)""",
+        caption=start_caption,
         reply_markup=btns
     )
-    asyncio.create_task(delete_message_later(start_message.chat.id, start_message.id))
+    # স্টার্ট মেসেজ অটো ডিলিট না করার পরামর্শ দেওয়া হলো যাতে ইউজার বাটন ব্যবহার করতে পারে।
+    # তবে আপনি চাইলে আগের মতো ডিলিট করতে পারেন। আমি এখানে ডিলিট বাদ দিয়েছি।
 
 # ------------------- অ্যাডমিন কমান্ড -------------------
 @app.on_message(filters.command("broadcast") & filters.user(ADMIN_IDS))
@@ -522,7 +543,6 @@ async def handle_admin_reply(_, cq: CallbackQuery):
         "coming": f"🚀 **শীঘ্রই আসবে!**\n\nভাইয়া, **'{original_query}'** মুভিটি খুব শীঘ্রই আমাদের চ্যানেলে আসবে। আমরা এটি সংগ্রহের চেষ্টা করছি। অনুগ্রহ করে অপেক্ষা করুন।",
         "notyet": f"⏳ **এখনো আসেনি!**\n\n**'{original_query}'** মুভিটি এখনো আমাদের ডাটাবেসে নেই। তবে আমরা এটি নোট করে রেখেছি, শীঘ্রই যুক্ত করা হবে।"
     }
-    
     try:
         m_sent = await app.send_message(user_id, messages[reason])
         asyncio.create_task(delete_message_later(m_sent.chat.id, m_sent.id))
@@ -736,12 +756,71 @@ async def search(_, msg: Message):
             except Exception:
                 pass
 
-# ------------------- কলব্যাক হ্যান্ডলার -------------------
+# ------------------- কলব্যাক হ্যান্ডলার (আপডেটেড) -------------------
 @app.on_callback_query()
 async def callback_handler(_, cq: CallbackQuery):
     data = cq.data
 
-    if data.startswith("report_"):
+    # --- নতুন মেনু হ্যান্ডলার ---
+    if data == "home_menu":
+        greeting = get_greeting()
+        user_mention = cq.from_user.mention
+        bot_username = app.me.username
+        start_caption = f"""
+HEY {user_mention}, {greeting}
+
+🤖 **I AM {app.me.first_name},** THE MOST
+POWERFUL AUTO FILTER BOT WITH 
+PREMIUM FEATURES.
+"""
+        btns = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔰 ADD ME TO YOUR GROUP 🔰", url=f"https://t.me/{bot_username}?startgroup=true")],
+            [InlineKeyboardButton("HELP 📢", callback_data="help_menu"), InlineKeyboardButton("ABOUT 📘", callback_data="about_menu")],
+            [InlineKeyboardButton("TOP SEARCHING ⭐", callback_data="top_searching"), InlineKeyboardButton("UPGRADE 🎟️", url=UPDATE_CHANNEL)]
+        ])
+        await cq.message.edit_caption(caption=start_caption, reply_markup=btns)
+
+    elif data == "help_menu":
+        help_text = """
+**⚙️ বটের সকল কমান্ড (Commands):**
+
+/start - বট চালু করুন
+/popular - জনপ্রিয় মুভি দেখুন
+/request <নাম> - মুভি রিকোয়েস্ট করুন
+/feedback <বার্তা> - অ্যাডমিনকে মতামত জানান
+
+**🔎 সার্চ:** যেকোনো মুভির নাম লিখে পাঠালেই হবে।
+**🛑 রিপোর্ট:** ডাউনলোড লিংক কাজ না করলে 'Report' বাটনে ক্লিক করবেন।
+"""
+        back_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 ফিরে যান", callback_data="home_menu")]])
+        await cq.message.edit_caption(caption=help_text, reply_markup=back_btn)
+
+    elif data == "about_menu":
+        about_text = f"""
+**🤖 Bot Name:** {app.me.first_name}
+**🛠 Developed By:** Ctgmovies23
+**📣 Channel:** [Click Here]({UPDATE_CHANNEL})
+**🧠 Language:** Python 3 (Pyrogram)
+**🗄 Database:** MongoDB
+
+এই বটটি সম্পূর্ণ অটোমেটিক। মুভির নাম লিখলে এটি ডাটাবেস থেকে খুঁজে বের করে দেয়।
+"""
+        back_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 ফিরে যান", callback_data="home_menu")]])
+        await cq.message.edit_caption(caption=about_text, reply_markup=back_btn)
+
+    elif data == "top_searching":
+        popular_movies_list = list(movies_col.find({"views_count": {"$exists": True}}).sort("views_count", -1).limit(RESULTS_COUNT))
+        if popular_movies_list:
+            text = "🔥 **জনপ্রিয় সার্চসমূহ:**\n\n"
+            for i, movie in enumerate(popular_movies_list, 1):
+                text += f"{i}. {movie['title']} ({movie.get('views_count', 0)} views)\n"
+            back_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 ফিরে যান", callback_data="home_menu")]])
+            await cq.message.edit_caption(caption=text, reply_markup=back_btn)
+        else:
+            await cq.answer("এখনো কোনো তথ্য নেই!", show_alert=True)
+
+    # --- আগের হ্যান্ডলার ---
+    elif data.startswith("report_"):
         try:
             message_id = int(data.split("_")[1])
             user_id = cq.from_user.id
@@ -852,6 +931,5 @@ async def callback_handler(_, cq: CallbackQuery):
 
 if __name__ == "__main__":
     print("বট শুরু হচ্ছে...")
-    # লুপ ব্যাকগ্রাউন্ডে স্টার্ট করা হচ্ছে
     app.loop.create_task(auto_group_messenger())
     app.run()
