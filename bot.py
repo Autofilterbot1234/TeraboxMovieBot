@@ -19,7 +19,7 @@ import math
 from datetime import datetime, UTC, timedelta 
 import asyncio
 import urllib.parse
-from fuzzywuzzy import process, fuzz # [UPDATE] fuzz ইমপোর্ট করা হলো শক্তিশালী সার্চের জন্য
+from fuzzywuzzy import process, fuzz 
 from concurrent.futures import ThreadPoolExecutor
 
 # ------------------- কনফিগারেশন -------------------
@@ -126,7 +126,7 @@ async def delete_message_later(chat_id, message_id, delay=300):
     except Exception:
         pass
 
-# [OPTIMIZED] ফাজি সার্চ লজিক - আরও উন্নত করা হয়েছে
+# [OPTIMIZED] ফাজি সার্চ লজিক
 def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=55, limit=5):
     if not all_movie_titles_data:
         return []
@@ -154,7 +154,6 @@ def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=55, 
                         seen_titles.add(movie_data["message_id"])
                     break
                     
-    # স্কোর অনুযায়ী সর্ট করা
     return sorted(corrected_suggestions, key=lambda x: x["score"], reverse=True)
 
 # ------------------- অটো গ্রুপ মেসেঞ্জার -------------------
@@ -622,7 +621,7 @@ async def request_movie(_, msg: Message):
         except Exception:
             pass
 
-# ------------------- স্মার্ট সার্চ হ্যান্ডলার (FIXED) -------------------
+# ------------------- স্মার্ট সার্চ হ্যান্ডলার (UPDATED) -------------------
 @app.on_message(filters.text & (filters.group | filters.private))
 async def search(_, msg: Message):
     query = msg.text.strip()
@@ -711,6 +710,30 @@ async def search(_, msg: Message):
 """
         m = await msg.reply(did_you_mean_text, reply_markup=InlineKeyboardMarkup(buttons), quote=True)
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
+
+        # [NEW UPDATE] এডমিনকে নোটিফিকেশন পাঠানো যখন সাজেশন দেওয়া হয়
+        encoded_query = urllib.parse.quote_plus(query)
+        admin_fuzzy_btns = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("❌ ভুল নাম রিপ্লাই", callback_data=f"noresult_wrong_{user_id}_{encoded_query}"),
+                InlineKeyboardButton("📤 আপলোড আছে রিপ্লাই", callback_data=f"noresult_uploaded_{user_id}_{encoded_query}")
+            ]
+        ])
+
+        for admin_id in ADMIN_IDS:
+            try:
+                await app.send_message(
+                    admin_id,
+                    f"⚠️ **বানান ভুল / সাজেশন অ্যালার্ট!**\n\n"
+                    f"🔍 ইউজার সার্চ করেছে: `{query}`\n"
+                    f"🤖 বট সাজেশন দিয়েছে: `{best_match_name}`\n"
+                    f"👤 ইউজার: [{msg.from_user.first_name}](tg://user?id={user_id}) (`{user_id}`)\n\n"
+                    f"ℹ️ *ইউজার মুভিটি সরাসরি পায়নি, বট তাকে সাজেশন দিয়েছে।*",
+                    reply_markup=admin_fuzzy_btns,
+                    disable_web_page_preview=True
+                )
+            except Exception:
+                pass
         
     else:
         # ৩. কিছুই না পাওয়া গেলে
