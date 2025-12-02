@@ -108,7 +108,6 @@ def get_readable_time(seconds):
     return f"{int(h):02d}:{int(m):02d}:{int(s):02d}"
 
 def get_greeting():
-    # বাংলাদেশ সময় অনুযায়ী গ্রীটিং (UTC+6)
     utc_now = datetime.now(UTC)
     bd_hour = (utc_now.hour + 6) % 24
     if 5 <= bd_hour < 12:
@@ -127,23 +126,32 @@ async def delete_message_later(chat_id, message_id, delay=300):
     except Exception:
         pass
 
-def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=70, limit=5):
+def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=60, limit=5):
+    # score_cutoff 60 করা হলো যাতে ভুল বানান হলেও ধরে ফেলে
     if not all_movie_titles_data:
         return []
     choices = [item["title_clean"] for item in all_movie_titles_data]
     matches_raw = process.extract(query_clean, choices, limit=limit)
     corrected_suggestions = []
+    seen_titles = set()
+    
     for matched_clean_title, score in matches_raw:
         if score >= score_cutoff:
             for movie_data in all_movie_titles_data:
                 if movie_data["title_clean"] == matched_clean_title:
-                    corrected_suggestions.append({
-                        "title": movie_data["original_title"],
-                        "message_id": movie_data["message_id"],
-                        "language": movie_data["language"],
-                        "views_count": movie_data.get("views_count", 0)
-                    })
+                    # ডুপ্লিকেট রিমুভ করার জন্য
+                    if movie_data["message_id"] not in seen_titles:
+                        corrected_suggestions.append({
+                            "title": movie_data["original_title"],
+                            "message_id": movie_data["message_id"],
+                            "language": movie_data["language"],
+                            "views_count": movie_data.get("views_count", 0),
+                            "score": score # স্কোর অ্যাড করা হলো বেস্ট ম্যাচ বুঝার জন্য
+                        })
+                        seen_titles.add(movie_data["message_id"])
                     break
+    # স্কোর অনুযায়ী সর্ট করা
+    corrected_suggestions.sort(key=lambda x: x["score"], reverse=True)
     return corrected_suggestions
 
 # ------------------- অটো গ্রুপ মেসেঞ্জার -------------------
@@ -321,7 +329,7 @@ async def log_group(_, msg: Message):
         upsert=True
     )
 
-# ------------------- স্টার্ট কমান্ড (নতুন ডিজাইন) -------------------
+# ------------------- স্টার্ট কমান্ড -------------------
 user_last_start_time = {}
 
 @app.on_message(filters.command("start"))
@@ -329,14 +337,12 @@ async def start(_, msg: Message):
     user_id = msg.from_user.id
     current_time = datetime.now(UTC)
     
-    # স্প্যাম প্রোটেকশন
     if user_id in user_last_start_time:
         time_since_last_start = current_time - user_last_start_time[user_id]
         if time_since_last_start < timedelta(seconds=2):
             return
     user_last_start_time[user_id] = current_time
 
-    # ১. মুভি ডাউনলোড লিংক হ্যান্ডলিং
     if len(msg.command) > 1 and msg.command[1].startswith("watch_"):
         message_id = int(msg.command[1].replace("watch_", ""))
         protect_setting = settings_col.find_one({"key": "protect_forwarding"})
@@ -370,7 +376,6 @@ async def start(_, msg: Message):
             asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
         return 
 
-    # ২. নরমাল স্টার্ট মেসেজ (আপডেট করা ডিজাইন)
     users_col.update_one(
         {"_id": msg.from_user.id},
         {"$set": {"joined": datetime.now(UTC), "notify": True}},
@@ -388,7 +393,6 @@ HEY {user_mention}, {greeting}
 POWERFUL AUTO FILTER BOT WITH 
 PREMIUM FEATURES.
 """
-    # বাটন সাজানো
     btns = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔰 ADD ME TO YOUR GROUP 🔰", url=f"https://t.me/{bot_username}?startgroup=true")],
         [
@@ -401,13 +405,11 @@ PREMIUM FEATURES.
         ]
     ])
 
-    start_message = await msg.reply_photo(
+    await msg.reply_photo(
         photo=START_PIC,
         caption=start_caption,
         reply_markup=btns
     )
-    # স্টার্ট মেসেজ অটো ডিলিট না করার পরামর্শ দেওয়া হলো যাতে ইউজার বাটন ব্যবহার করতে পারে।
-    # তবে আপনি চাইলে আগের মতো ডিলিট করতে পারেন। আমি এখানে ডিলিট বাদ দিয়েছি।
 
 # ------------------- অ্যাডমিন কমান্ড -------------------
 @app.on_message(filters.command("broadcast") & filters.user(ADMIN_IDS))
@@ -617,14 +619,13 @@ async def request_movie(_, msg: Message):
         except Exception:
             pass
 
-# ------------------- স্মার্ট সার্চ হ্যান্ডলার -------------------
+# ------------------- স্মার্ট সার্চ হ্যান্ডলার (আপডেটেড - Did you mean?) -------------------
 @app.on_message(filters.text & (filters.group | filters.private))
 async def search(_, msg: Message):
     query = msg.text.strip()
     if not query:
         return
     if msg.chat.type in ["group", "supergroup"]:
-        # গ্রুপে সার্চ করলেও আইডি সেভ হবে
         groups_col.update_one({"_id": msg.chat.id}, {"$set": {"title": msg.chat.title, "active": True}}, upsert=True)
         if len(query) < 3: return
         if msg.reply_to_message or msg.from_user.is_bot: return
@@ -688,12 +689,15 @@ async def search(_, msg: Message):
         find_corrected_matches,
         query_clean,
         all_movie_data,
-        70,
+        60, # স্কোর কাটঅফ কমানো হলো
         RESULTS_COUNT
     )
     await loading_message.delete()
 
     if corrected_suggestions:
+        # [FEATURE] Did You Mean Logic
+        best_match_name = corrected_suggestions[0]['title']
+        
         buttons = []
         for movie in corrected_suggestions:
             buttons.append([
@@ -708,7 +712,14 @@ async def search(_, msg: Message):
             InlineKeyboardButton("ইংলিশ", callback_data=f"lang_English_{query_clean}")
         ]
         buttons.append(lang_buttons)
-        m = await msg.reply("🔍 সরাসরি কোনো মুভি পাওয়া যায়নি, তবে কাছাকাছি কিছু নাম পাওয়া গেছে:", reply_markup=InlineKeyboardMarkup(buttons), quote=True)
+        
+        did_you_mean_text = f"""
+❌ **আপনার বানানে হয়তো ভুল আছে!**
+
+🤔 আপনি কি **{best_match_name}** খুঁজছেন?
+নিচে আপনার সার্চের সাথে সবচেয়ে মিল থাকা রেজাল্টগুলো দেওয়া হলো:
+"""
+        m = await msg.reply(did_you_mean_text, reply_markup=InlineKeyboardMarkup(buttons), quote=True)
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
     else:
         Google_Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
@@ -756,12 +767,11 @@ async def search(_, msg: Message):
             except Exception:
                 pass
 
-# ------------------- কলব্যাক হ্যান্ডলার (আপডেটেড) -------------------
+# ------------------- কলব্যাক হ্যান্ডলার -------------------
 @app.on_callback_query()
 async def callback_handler(_, cq: CallbackQuery):
     data = cq.data
 
-    # --- নতুন মেনু হ্যান্ডলার ---
     if data == "home_menu":
         greeting = get_greeting()
         user_mention = cq.from_user.mention
@@ -819,7 +829,6 @@ PREMIUM FEATURES.
         else:
             await cq.answer("এখনো কোনো তথ্য নেই!", show_alert=True)
 
-    # --- আগের হ্যান্ডলার ---
     elif data.startswith("report_"):
         try:
             message_id = int(data.split("_")[1])
