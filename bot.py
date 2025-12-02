@@ -34,8 +34,10 @@ UPDATE_CHANNEL = os.getenv("UPDATE_CHANNEL", "https://t.me/TGLinkBase")
 START_PIC = os.getenv("START_PIC", "https://i.ibb.co/prnGXMr3/photo-2025-05-16-05-15-45-7504908428624527364.jpg")
 BROADCAST_PIC = os.getenv("BROADCAST_PIC", "https://telegra.ph/file/18659550b694b47000787.jpg")
 
-# [NEW FEATURE] অটো মেসেজ কনফিগারেশন
-AUTO_MSG_INTERVAL = 20  # কত সেকেন্ড পর পর মেসেজ দিবে (১৫-২০ সেকেন্ড রিকমেন্ডেড)
+# [CONFIG] অটো মেসেজ সেটিংস
+AUTO_MSG_INTERVAL = 250  # লুপ বিরতি (সেকেন্ডে) - ২০ সেকেন্ড পর পর চেক করবে
+AUTO_MSG_DELETE_TIME = 300 # কতক্ষণ পর মেসেজ ডিলিট হবে (৩০০ সেকেন্ড = ৫ মিনিট)
+
 AUTO_MESSAGE_TEXT = """
 **🔔 নিয়মিত আপডেট!**
 
@@ -56,7 +58,7 @@ stats_col = db["stats"]
 users_col = db["users"]
 settings_col = db["settings"]
 requests_col = db["requests"]
-groups_col = db["groups"] # [NEW FEATURE] নতুন কালেকশন গ্রুপগুলোর জন্য
+groups_col = db["groups"]  # গ্রুপ ডাটাবেস
 
 # ইনডেক্সিং
 try:
@@ -132,9 +134,9 @@ def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=70, 
                     break
     return corrected_suggestions
 
-# [NEW FEATURE] অটোমেটিক গ্রুপ মেসেজ সেন্ডার লুপ
+# ------------------- অটো গ্রুপ মেসেঞ্জার (ফাইনাল) -------------------
 async def auto_group_messenger():
-    print("✅ অটো গ্রুপ মেসেজ সিস্টেম চালু হয়েছে...")
+    print("✅ অটো গ্রুপ মেসেজ সিস্টেম এবং অটো-ডিলিট চালু হয়েছে...")
     while True:
         # ডাটাবেস থেকে সব গ্রুপ আইডি নেওয়া
         all_groups = groups_col.find({})
@@ -142,24 +144,25 @@ async def auto_group_messenger():
         for group in all_groups:
             chat_id = group["_id"]
             try:
-                # মেসেজ পাঠানো
+                # ১. মেসেজ পাঠানো
                 sent = await app.send_message(chat_id, AUTO_MESSAGE_TEXT)
                 
-                # মেসেজটি কিছুক্ষণ পর ডিলিট করতে চাইলে নিচের লাইন আনকমেন্ট করুন
-                # asyncio.create_task(delete_message_later(chat_id, sent.id, delay=300))
+                # ২. মেসেজ ডিলিট টাস্ক (৩০০ সেকেন্ড / ৫ মিনিট পর)
+                if sent:
+                    asyncio.create_task(delete_message_later(chat_id, sent.id, delay=AUTO_MSG_DELETE_TIME))
                 
             except FloodWait as e:
                 await asyncio.sleep(e.value)
             except (PeerIdInvalid, UserIsBlocked):
                 # বট গ্রুপ থেকে কিক খেলে ডাটাবেস থেকে রিমুভ হবে
                 groups_col.delete_one({"_id": chat_id})
-            except Exception as e:
+            except Exception:
                 pass
             
-            # প্রতিটি গ্রুপে পাঠানোর মাঝে ১ সেকেন্ড গ্যাপ (সেফ থাকার জন্য)
-            await asyncio.sleep(1) 
+            # প্রতিটি গ্রুপে পাঠানোর মাঝে ১.৫ সেকেন্ড গ্যাপ (সেফ থাকার জন্য)
+            await asyncio.sleep(1.5) 
 
-        # লুপ শেষ হওয়ার পর নির্দিষ্ট সময় অপেক্ষা (যেমন ১৫-২০ সেকেন্ড)
+        # সব গ্রুপে পাঠানো শেষ হলে ২০ সেকেন্ড অপেক্ষা করে আবার শুরু করবে
         await asyncio.sleep(AUTO_MSG_INTERVAL)
 
 # ------------------- ব্রডকাস্ট ইঞ্জিন -------------------
@@ -310,7 +313,7 @@ async def save_post(_, msg: Message):
         if setting and setting.get("value"):
             asyncio.create_task(auto_broadcast_worker(movie_title, msg.id, thumbnail_file_id))
 
-# [NEW FEATURE] গ্রুপে মেসেজ দিলে বা বট এড হলে গ্রুপ আইডি সেভ হবে
+# [FIX] গ্রুপ ট্র্যাকার (গ্রুপে যেকোনো মেসেজ আসলে আইডি সেভ হবে)
 @app.on_message(filters.group, group=10)
 async def log_group(_, msg: Message):
     groups_col.update_one(
@@ -432,7 +435,6 @@ async def feedback(_, msg: Message):
 
 @app.on_message(filters.command("stats") & filters.user(ADMIN_IDS))
 async def stats(_, msg: Message):
-    # [NEW FEATURE] স্ট্যাটসে গ্রুপের সংখ্যা দেখানো
     total_groups = groups_col.count_documents({})
     stats_msg = await msg.reply(
         f"""মোট ব্যবহারকারী: {users_col.count_documents({})}
@@ -601,9 +603,9 @@ async def search(_, msg: Message):
     query = msg.text.strip()
     if not query:
         return
-    # [FIXED] গ্রুপে বট মেসেজ রিড করলে আইডি সেভ হবে
     if msg.chat.type in ["group", "supergroup"]:
-        groups_col.update_one({"_id": msg.chat.id}, {"$set": {"title": msg.chat.title}}, upsert=True)
+        # গ্রুপে সার্চ করলেও আইডি সেভ হবে
+        groups_col.update_one({"_id": msg.chat.id}, {"$set": {"title": msg.chat.title, "active": True}}, upsert=True)
         if len(query) < 3: return
         if msg.reply_to_message or msg.from_user.is_bot: return
         if not re.search(r'[a-zA-Z0-9]', query): return
@@ -850,6 +852,6 @@ async def callback_handler(_, cq: CallbackQuery):
 
 if __name__ == "__main__":
     print("বট শুরু হচ্ছে...")
-    # [NEW FEATURE] লুপ ব্যাকগ্রাউন্ডে স্টার্ট করা হচ্ছে
+    # লুপ ব্যাকগ্রাউন্ডে স্টার্ট করা হচ্ছে
     app.loop.create_task(auto_group_messenger())
     app.run()
