@@ -94,7 +94,8 @@ def get_readable_time(seconds):
     h, m = divmod(m, 60)
     return f"{int(h):02d}:{int(m):02d}:{int(s):02d}"
 
-async def delete_message_later(chat_id, message_id, delay=43200): # 12 ঘন্টা
+# [FIXED] ডিফল্ট টাইম ৩০০ সেকেন্ড (৫ মিনিট) করা হয়েছে সাধারণ মেসেজের জন্য
+async def delete_message_later(chat_id, message_id, delay=300): 
     await asyncio.sleep(delay)
     try:
         await app.delete_messages(chat_id, message_id)
@@ -226,11 +227,17 @@ async def auto_broadcast_worker(movie_title, message_id, thumbnail_id=None):
                 break
             except: pass
 
+    # [FIXED] নোটিফিকেশন মেসেজ ২৪ ঘন্টা (৮৬৪০০ সেকেন্ড) পর ডিলিট হবে
     async def send_func(user_id):
+        sent_msg = None
         if thumbnail_id:
-            await app.send_photo(user_id, photo=thumbnail_id, caption=notification_caption, reply_markup=download_button)
+            sent_msg = await app.send_photo(user_id, photo=thumbnail_id, caption=notification_caption, reply_markup=download_button)
         else:
-            await app.send_message(user_id, notification_caption, reply_markup=download_button)
+            sent_msg = await app.send_message(user_id, notification_caption, reply_markup=download_button)
+        
+        # এখানে ডিলিট টাস্ক শিডিউল করা হলো
+        if sent_msg:
+            asyncio.create_task(delete_message_later(sent_msg.chat.id, sent_msg.id, delay=86400)) # 24 Hours
 
     await broadcast_messages(all_user_ids, send_func, status_msg, total_users)
 
@@ -277,6 +284,7 @@ async def start(_, msg: Message):
             return
     user_last_start_time[user_id] = current_time
 
+    # [FIXED] মুভি ওয়াচ লিংক হ্যান্ডলিং
     if len(msg.command) > 1 and msg.command[1].startswith("watch_"):
         message_id = int(msg.command[1].replace("watch_", ""))
         protect_setting = settings_col.find_one({"key": "protect_forwarding"})
@@ -299,6 +307,7 @@ async def start(_, msg: Message):
                     reply_markup=action_buttons,
                     reply_to_message_id=copied_message.id 
                 )
+                # ৫ মিনিট পর ডিলিট (ডিফল্ট)
                 asyncio.create_task(delete_message_later(report_message.chat.id, report_message.id))
                 asyncio.create_task(delete_message_later(copied_message.chat.id, copied_message.id))
             movies_col.update_one(
@@ -328,6 +337,7 @@ Telegram: @ctgmovies23
 Channel: [All Bot Update My](https://t.me/AllBotUpdatemy)""",
         reply_markup=btns
     )
+    # ৫ মিনিট পর ডিলিট (ডিফল্ট)
     asyncio.create_task(delete_message_later(start_message.chat.id, start_message.id))
 
 # ------------------- অ্যাডমিন কমান্ড -------------------
@@ -350,12 +360,18 @@ async def broadcast(_, msg: Message):
         )
     except Exception:
         status_msg = await msg.reply(f"🚀 **ম্যানুয়াল ব্রডকাস্ট শুরু হচ্ছে...**\n👥 মোট টার্গেট: `{total_users}`")
+    
+    # ম্যানুয়াল ব্রডকাস্টও ২৪ ঘন্টা পর ডিলিট হবে (ঐচ্ছিক, চাইলে এখানেও logic বসাতে পারেন)
     async def send_func(user_id):
+        m = None
         if msg.reply_to_message:
-            await msg.reply_to_message.copy(user_id)
+            m = await msg.reply_to_message.copy(user_id)
         else:
             broadcast_text = msg.text.split(None, 1)[1]
-            await app.send_message(user_id, broadcast_text, disable_web_page_preview=True)
+            m = await app.send_message(user_id, broadcast_text, disable_web_page_preview=True)
+        # ম্যানুয়াল ব্রডকাস্ট ডিলিট করতে চাইলে নিচের লাইনটি আনকমেন্ট করুন
+        # if m: asyncio.create_task(delete_message_later(m.chat.id, m.id, delay=86400))
+
     await broadcast_messages(all_user_ids, send_func, status_msg, total_users)
 
 @app.on_message(filters.command("feedback") & filters.private)
@@ -442,7 +458,7 @@ async def delete_all_movies_command(_, msg: Message):
     reply_msg = await msg.reply("আপনি কি নিশ্চিত যে আপনি ডাটাবেস থেকে **সব মুভি** ডিলিট করতে চান? এই প্রক্রিয়াটি অপরিবর্তনীয়!", reply_markup=confirmation_button)
     asyncio.create_task(delete_message_later(reply_msg.chat.id, reply_msg.id))
 
-# ------------------- অ্যাডমিন রিপ্লাই হ্যান্ডলার (আপডেটেড ও স্মার্ট) -------------------
+# ------------------- অ্যাডমিন রিপ্লাই হ্যান্ডলার -------------------
 @app.on_callback_query(filters.regex(r"^noresult_(wrong|notyet|uploaded|coming|unreleased|processing)_(\d+)_([^ ]+)$") & filters.user(ADMIN_IDS))
 async def handle_admin_reply(_, cq: CallbackQuery):
     parts = cq.data.split("_", 3)
@@ -451,26 +467,20 @@ async def handle_admin_reply(_, cq: CallbackQuery):
     encoded_query = parts[3]
     original_query = urllib.parse.unquote_plus(encoded_query)
 
-    # স্মার্ট মেসেজ লিস্ট
     messages = {
         "wrong": f"❌ **দুঃখিত! নামটিতে ভুল আছে।**\n\nভাইয়া, **'{original_query}'** নামে কোনো মুভি নেই বা বানান ভুল হয়েছে। দয়া করে Google থেকে সঠিক বানানটি দেখে আবার সার্চ করুন।",
-        
         "unreleased": f"🚫 **অপ্রকাশিত মুভি!**\n\nভাইয়া, **'{original_query}'** মুভিটি এখনো অফিসিয়ালি ডিজিটাল/ওটিটি-তে রিলিজ হয়নি। রিলিজ হওয়ার সাথে সাথেই আমাদের চ্যানেলে পেয়ে যাবেন।",
-        
         "uploaded": f"✅ **মুভিটি আমাদের কাছে আছে!**\n\nভাইয়া, **'{original_query}'** মুভিটি অলরেডি আপলোড করা আছে। আপনি সম্ভবত ভুল বানানে সার্চ করেছেন। দয়া করে সঠিক বানানে আবার চেষ্টা করুন।",
-        
         "processing": f"♻️ **কাজ চলছে!**\n\nভাইয়া, **'{original_query}'** মুভিটি নিয়ে আমরা কাজ করছি। কিছুক্ষণের মধ্যেই আপলোড করা হবে। সাথে থাকার জন্য ধন্যবাদ!",
-        
         "coming": f"🚀 **শীঘ্রই আসবে!**\n\nভাইয়া, **'{original_query}'** মুভিটি খুব শীঘ্রই আমাদের চ্যানেলে আসবে। আমরা এটি সংগ্রহের চেষ্টা করছি। অনুগ্রহ করে অপেক্ষা করুন।",
-        
         "notyet": f"⏳ **এখনো আসেনি!**\n\n**'{original_query}'** মুভিটি এখনো আমাদের ডাটাবেসে নেই। তবে আমরা এটি নোট করে রেখেছি, শীঘ্রই যুক্ত করা হবে।"
     }
     
     try:
         m_sent = await app.send_message(user_id, messages[reason])
+        # ৫ মিনিট পর ডিলিট (ডিফল্ট)
         asyncio.create_task(delete_message_later(m_sent.chat.id, m_sent.id))
         await cq.answer("ব্যবহারকারীকে জানানো হয়েছে ✅", show_alert=True)
-        # বাটনের টেক্সট আপডেট
         btn_text = {
             "wrong": "ভুল নাম ❌", "unreleased": "রিলিজ হয়নি 🚫", 
             "uploaded": "আপলোড আছে ✅", "processing": "কাজ চলছে ♻️",
@@ -541,7 +551,7 @@ async def request_movie(_, msg: Message):
         except Exception:
             pass
 
-# ------------------- স্মার্ট সার্চ হ্যান্ডলার (ফাইনাল) -------------------
+# ------------------- স্মার্ট সার্চ হ্যান্ডলার -------------------
 @app.on_message(filters.text & (filters.group | filters.private))
 async def search(_, msg: Message):
     query = msg.text.strip()
@@ -561,7 +571,6 @@ async def search(_, msg: Message):
 
     loading_message = await msg.reply("🔎 লোড হচ্ছে...", quote=True)
     
-    # ১. সাল (Year) আলাদা করা
     query_title_only = re.sub(r'\b(19|20)\d{2}\b', '', query).strip()
     if not query_title_only:
         query_title_only = query 
@@ -637,7 +646,6 @@ async def search(_, msg: Message):
         m = await msg.reply("🔍 সরাসরি কোনো মুভি পাওয়া যায়নি, তবে কাছাকাছি কিছু নাম পাওয়া গেছে:", reply_markup=InlineKeyboardMarkup(buttons), quote=True)
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
     else:
-        # কিছুই না পাওয়া গেলে (এডমিন নোটিফিকেশন + গুগল বাটন)
         Google_Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
         request_button = InlineKeyboardButton("এই মুভির জন্য অনুরোধ করুন", callback_data=f"request_movie_{user_id}_{urllib.parse.quote_plus(query)}")
         google_button_row = [InlineKeyboardButton("গুগলে সার্চ করুন", url=Google_Search_url)]
@@ -655,8 +663,6 @@ async def search(_, msg: Message):
         asyncio.create_task(delete_message_later(alert.chat.id, alert.id))
         
         encoded_query = urllib.parse.quote_plus(query)
-        
-        # --- নতুন আপডেটেড বাটন (স্মার্ট অপশন) ---
         admin_btns = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("❌ ভুল নাম", callback_data=f"noresult_wrong_{user_id}_{encoded_query}"),
@@ -797,7 +803,6 @@ async def callback_handler(_, cq: CallbackQuery):
             pass
 
     elif "_" in data:
-        # পুরনো কোনো হ্যান্ডলার থাকলে ইগনোর করবে, নতুনটা উপরে হ্যান্ডেল করা হয়েছে
         await cq.answer()
 
 if __name__ == "__main__":
