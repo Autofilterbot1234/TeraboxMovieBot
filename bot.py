@@ -19,7 +19,7 @@ import math
 from datetime import datetime, UTC, timedelta 
 import asyncio
 import urllib.parse
-from fuzzywuzzy import process
+from fuzzywuzzy import process, fuzz # [UPDATE] fuzz ইমপোর্ট করা হলো শক্তিশালী সার্চের জন্য
 from concurrent.futures import ThreadPoolExecutor
 
 # ------------------- কনফিগারেশন -------------------
@@ -108,7 +108,6 @@ def get_readable_time(seconds):
     return f"{int(h):02d}:{int(m):02d}:{int(s):02d}"
 
 def get_greeting():
-    # বাংলাদেশ সময় অনুযায়ী গ্রীটিং (UTC+6)
     utc_now = datetime.now(UTC)
     bd_hour = (utc_now.hour + 6) % 24
     if 5 <= bd_hour < 12:
@@ -127,24 +126,36 @@ async def delete_message_later(chat_id, message_id, delay=300):
     except Exception:
         pass
 
-def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=70, limit=5):
+# [OPTIMIZED] ফাজি সার্চ লজিক - আরও উন্নত করা হয়েছে
+def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=55, limit=5):
     if not all_movie_titles_data:
         return []
+    
     choices = [item["title_clean"] for item in all_movie_titles_data]
-    matches_raw = process.extract(query_clean, choices, limit=limit)
+    
+    # WRatio ব্যবহার করা হচ্ছে যা টাইপো এবং আংশিক মিল ভালোভাবে ধরে
+    matches_raw = process.extract(query_clean, choices, limit=limit, scorer=fuzz.WRatio)
+    
     corrected_suggestions = []
+    seen_titles = set()
+    
     for matched_clean_title, score in matches_raw:
         if score >= score_cutoff:
             for movie_data in all_movie_titles_data:
                 if movie_data["title_clean"] == matched_clean_title:
-                    corrected_suggestions.append({
-                        "title": movie_data["original_title"],
-                        "message_id": movie_data["message_id"],
-                        "language": movie_data["language"],
-                        "views_count": movie_data.get("views_count", 0)
-                    })
+                    if movie_data["message_id"] not in seen_titles:
+                        corrected_suggestions.append({
+                            "title": movie_data["original_title"],
+                            "message_id": movie_data["message_id"],
+                            "language": movie_data["language"],
+                            "views_count": movie_data.get("views_count", 0),
+                            "score": score
+                        })
+                        seen_titles.add(movie_data["message_id"])
                     break
-    return corrected_suggestions
+                    
+    # স্কোর অনুযায়ী সর্ট করা
+    return sorted(corrected_suggestions, key=lambda x: x["score"], reverse=True)
 
 # ------------------- অটো গ্রুপ মেসেঞ্জার -------------------
 async def auto_group_messenger():
@@ -321,7 +332,7 @@ async def log_group(_, msg: Message):
         upsert=True
     )
 
-# ------------------- স্টার্ট কমান্ড (নতুন ডিজাইন) -------------------
+# ------------------- স্টার্ট কমান্ড -------------------
 user_last_start_time = {}
 
 @app.on_message(filters.command("start"))
@@ -329,14 +340,12 @@ async def start(_, msg: Message):
     user_id = msg.from_user.id
     current_time = datetime.now(UTC)
     
-    # স্প্যাম প্রোটেকশন
     if user_id in user_last_start_time:
         time_since_last_start = current_time - user_last_start_time[user_id]
         if time_since_last_start < timedelta(seconds=2):
             return
     user_last_start_time[user_id] = current_time
 
-    # ১. মুভি ডাউনলোড লিংক হ্যান্ডলিং
     if len(msg.command) > 1 and msg.command[1].startswith("watch_"):
         message_id = int(msg.command[1].replace("watch_", ""))
         protect_setting = settings_col.find_one({"key": "protect_forwarding"})
@@ -370,7 +379,6 @@ async def start(_, msg: Message):
             asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
         return 
 
-    # ২. নরমাল স্টার্ট মেসেজ (আপডেট করা ডিজাইন)
     users_col.update_one(
         {"_id": msg.from_user.id},
         {"$set": {"joined": datetime.now(UTC), "notify": True}},
@@ -388,7 +396,6 @@ HEY {user_mention}, {greeting}
 POWERFUL AUTO FILTER BOT WITH 
 PREMIUM FEATURES.
 """
-    # বাটন সাজানো
     btns = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔰 ADD ME TO YOUR GROUP 🔰", url=f"https://t.me/{bot_username}?startgroup=true")],
         [
@@ -401,13 +408,11 @@ PREMIUM FEATURES.
         ]
     ])
 
-    start_message = await msg.reply_photo(
+    await msg.reply_photo(
         photo=START_PIC,
         caption=start_caption,
         reply_markup=btns
     )
-    # স্টার্ট মেসেজ অটো ডিলিট না করার পরামর্শ দেওয়া হলো যাতে ইউজার বাটন ব্যবহার করতে পারে।
-    # তবে আপনি চাইলে আগের মতো ডিলিট করতে পারেন। আমি এখানে ডিলিট বাদ দিয়েছি।
 
 # ------------------- অ্যাডমিন কমান্ড -------------------
 @app.on_message(filters.command("broadcast") & filters.user(ADMIN_IDS))
@@ -617,14 +622,14 @@ async def request_movie(_, msg: Message):
         except Exception:
             pass
 
-# ------------------- স্মার্ট সার্চ হ্যান্ডলার -------------------
+# ------------------- স্মার্ট সার্চ হ্যান্ডলার (FIXED) -------------------
 @app.on_message(filters.text & (filters.group | filters.private))
 async def search(_, msg: Message):
     query = msg.text.strip()
     if not query:
         return
+    
     if msg.chat.type in ["group", "supergroup"]:
-        # গ্রুপে সার্চ করলেও আইডি সেভ হবে
         groups_col.update_one({"_id": msg.chat.id}, {"$set": {"title": msg.chat.title, "active": True}}, upsert=True)
         if len(query) < 3: return
         if msg.reply_to_message or msg.from_user.is_bot: return
@@ -645,11 +650,20 @@ async def search(_, msg: Message):
 
     query_clean = clean_text(query_title_only)
 
+    # ১. প্রথমে Exact এবং Starts With চেক করবে
     exact_match = list(movies_col.find({"title_clean": query_clean}).limit(RESULTS_COUNT))
-    if exact_match:
+    
+    starts_with_match = list(movies_col.find({
+        "title_clean": {"$regex": f"^{re.escape(query_clean)}", "$options": "i"}
+    }).limit(RESULTS_COUNT))
+    
+    final_results = exact_match + [m for m in starts_with_match if m["message_id"] not in [e["message_id"] for e in exact_match]]
+    final_results = final_results[:RESULTS_COUNT]
+
+    if final_results:
         await loading_message.delete()
         buttons = []
-        for movie in exact_match:
+        for movie in final_results:
             buttons.append([
                 InlineKeyboardButton(
                     text=f"{movie['title'][:40]} ({movie.get('views_count', 0)} ভিউ)",
@@ -660,40 +674,26 @@ async def search(_, msg: Message):
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
         return
 
-    starts_with_match = list(movies_col.find({
-        "title_clean": {"$regex": f"^{re.escape(query_clean)}", "$options": "i"}
-    }).limit(RESULTS_COUNT))
-
-    if starts_with_match:
-        await loading_message.delete()
-        buttons = []
-        for movie in starts_with_match:
-            buttons.append([
-                InlineKeyboardButton(
-                    text=f"{movie['title'][:40]} ({movie.get('views_count', 0)} ভিউ)",
-                    url=f"https://t.me/{app.me.username}?start=watch_{movie['message_id']}"
-                )
-            ])
-        m = await msg.reply("🎬 নিচের মুভিগুলো পাওয়া গেছে:", reply_markup=InlineKeyboardMarkup(buttons), quote=True)
-        asyncio.create_task(delete_message_later(m.chat.id, m.id))
-        return
-
+    # ২. যদি কোনো রেজাল্ট না পাওয়া যায়, তখন Fuzzy Logic / Did You Mean চেক করবে
     all_movie_data_cursor = movies_col.find(
         {}, 
         {"title_clean": 1, "original_title": "$title", "message_id": 1, "language": 1, "views_count": 1}
     )
     all_movie_data = list(all_movie_data_cursor)
+    
     corrected_suggestions = await asyncio.get_event_loop().run_in_executor(
         thread_pool_executor,
         find_corrected_matches,
         query_clean,
         all_movie_data,
-        70,
+        50, # স্কোর কাটঅফ ৫০
         RESULTS_COUNT
     )
     await loading_message.delete()
 
     if corrected_suggestions:
+        best_match_name = corrected_suggestions[0]['title']
+        
         buttons = []
         for movie in corrected_suggestions:
             buttons.append([
@@ -702,15 +702,18 @@ async def search(_, msg: Message):
                     url=f"https://t.me/{app.me.username}?start=watch_{movie['message_id']}"
                 )
             ])
-        lang_buttons = [
-            InlineKeyboardButton("বেঙ্গলি", callback_data=f"lang_Bengali_{query_clean}"),
-            InlineKeyboardButton("হিন্দি", callback_data=f"lang_Hindi_{query_clean}"),
-            InlineKeyboardButton("ইংলিশ", callback_data=f"lang_English_{query_clean}")
-        ]
-        buttons.append(lang_buttons)
-        m = await msg.reply("🔍 সরাসরি কোনো মুভি পাওয়া যায়নি, তবে কাছাকাছি কিছু নাম পাওয়া গেছে:", reply_markup=InlineKeyboardMarkup(buttons), quote=True)
+        
+        did_you_mean_text = f"""
+❌ **আপনার বানানে হয়তো ভুল আছে!**
+
+🤔 আপনি কি **{best_match_name}** খুঁজছেন?
+নিচে আপনার সার্চের সাথে সবচেয়ে মিল থাকা রেজাল্টগুলো দেওয়া হলো:
+"""
+        m = await msg.reply(did_you_mean_text, reply_markup=InlineKeyboardMarkup(buttons), quote=True)
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
+        
     else:
+        # ৩. কিছুই না পাওয়া গেলে
         Google_Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
         request_button = InlineKeyboardButton("এই মুভির জন্য অনুরোধ করুন", callback_data=f"request_movie_{user_id}_{urllib.parse.quote_plus(query)}")
         google_button_row = [InlineKeyboardButton("গুগলে সার্চ করুন", url=Google_Search_url)]
@@ -756,12 +759,11 @@ async def search(_, msg: Message):
             except Exception:
                 pass
 
-# ------------------- কলব্যাক হ্যান্ডলার (আপডেটেড) -------------------
+# ------------------- কলব্যাক হ্যান্ডলার -------------------
 @app.on_callback_query()
 async def callback_handler(_, cq: CallbackQuery):
     data = cq.data
 
-    # --- নতুন মেনু হ্যান্ডলার ---
     if data == "home_menu":
         greeting = get_greeting()
         user_mention = cq.from_user.mention
@@ -819,7 +821,6 @@ PREMIUM FEATURES.
         else:
             await cq.answer("এখনো কোনো তথ্য নেই!", show_alert=True)
 
-    # --- আগের হ্যান্ডলার ---
     elif data.startswith("report_"):
         try:
             message_id = int(data.split("_")[1])
@@ -853,39 +854,6 @@ PREMIUM FEATURES.
         reply_msg = await cq.message.edit_text("❌ সব মুভি ডিলিট করার প্রক্রিয়া বাতিল করা হয়েছে।")
         asyncio.create_task(delete_message_later(reply_msg.chat.id, reply_msg.id))
         await cq.answer("বাতিল করা হয়েছে।")
-
-    elif data.startswith("lang_"):
-        _, lang, query_clean = data.split("_", 2)
-        potential_lang_matches_cursor = movies_col.find(
-            {"language": lang, "title_clean": {"$regex": query_clean, "$options": "i"}},
-            {"title": 1, "message_id": 1, "title_clean": 1, "views_count": 1}
-        ).limit(50)
-        potential_lang_matches = list(potential_lang_matches_cursor)
-        fuzzy_data_for_matching_lang = [
-            {"title_clean": m["title_clean"], "original_title": m["title"], "message_id": m["message_id"], 
-             "language": lang, "views_count": m.get("views_count", 0)}
-            for m in potential_lang_matches
-        ]
-        loop = asyncio.get_running_loop()
-        matches_filtered_by_lang = await loop.run_in_executor(
-            thread_pool_executor,
-            find_corrected_matches,
-            query_clean,
-            fuzzy_data_for_matching_lang,
-            70,
-            RESULTS_COUNT
-        )
-        if matches_filtered_by_lang:
-            buttons = []
-            for m in matches_filtered_by_lang[:RESULTS_COUNT]:
-                buttons.append([InlineKeyboardButton(f"{m['title'][:40]} ({m.get('views_count',0)} ভিউ)", url=f"https://t.me/{app.me.username}?start=watch_{m['message_id']}")])
-            reply_msg = await cq.message.edit_text(
-                f"ফলাফল ({lang}) - নিচের থেকে সিলেক্ট করুন:",
-                reply_markup=InlineKeyboardMarkup(buttons)
-            )
-            asyncio.create_task(delete_message_later(reply_msg.chat.id, reply_msg.id))
-        else:
-            await cq.answer("এই ভাষায় কিছু পাওয়া যায়নি।", show_alert=True)
 
     elif data.startswith("request_movie_"):
         _, user_id_str, encoded_movie_name = data.split("_", 2)
