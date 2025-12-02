@@ -711,12 +711,20 @@ async def search(_, msg: Message):
         m = await msg.reply(did_you_mean_text, reply_markup=InlineKeyboardMarkup(buttons), quote=True)
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
 
-        # [NEW UPDATE] এডমিনকে নোটিফিকেশন পাঠানো যখন সাজেশন দেওয়া হয়
+        # [NEW UPDATE] এডমিনকে নোটিফিকেশন পাঠানো যখন সাজেশন দেওয়া হয় (এখন ৬টি বাটন সহ)
         encoded_query = urllib.parse.quote_plus(query)
         admin_fuzzy_btns = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("❌ ভুল নাম রিপ্লাই", callback_data=f"noresult_wrong_{user_id}_{encoded_query}"),
-                InlineKeyboardButton("📤 আপলোড আছে রিপ্লাই", callback_data=f"noresult_uploaded_{user_id}_{encoded_query}")
+                InlineKeyboardButton("❌ ভুল নাম", callback_data=f"noresult_wrong_{user_id}_{encoded_query}"),
+                InlineKeyboardButton("🚫 রিলিজ হয়নি", callback_data=f"noresult_unreleased_{user_id}_{encoded_query}")
+            ],
+            [
+                InlineKeyboardButton("📤 আপলোড আছে", callback_data=f"noresult_uploaded_{user_id}_{encoded_query}"),
+                InlineKeyboardButton("♻️ কাজ চলছে", callback_data=f"noresult_processing_{user_id}_{encoded_query}")
+            ],
+            [
+                InlineKeyboardButton("🚀 শীঘ্রই আসবে", callback_data=f"noresult_coming_{user_id}_{encoded_query}"),
+                InlineKeyboardButton("⏳ এখনো আসেনি", callback_data=f"noresult_notyet_{user_id}_{encoded_query}")
             ]
         ])
 
