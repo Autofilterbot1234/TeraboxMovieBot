@@ -30,9 +30,20 @@ CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 RESULTS_COUNT = int(os.getenv("RESULTS_COUNT", 10))
 ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(",")))
 DATABASE_URL = os.getenv("DATABASE_URL")
-UPDATE_CHANNEL = os.getenv("UPDATE_CHANNEL", "https://t.me/CTGMovieOfficial")
+UPDATE_CHANNEL = os.getenv("UPDATE_CHANNEL", "https://t.me/TGLinkBase")
 START_PIC = os.getenv("START_PIC", "https://i.ibb.co/prnGXMr3/photo-2025-05-16-05-15-45-7504908428624527364.jpg")
 BROADCAST_PIC = os.getenv("BROADCAST_PIC", "https://telegra.ph/file/18659550b694b47000787.jpg")
+
+# [NEW FEATURE] অটো মেসেজ কনফিগারেশন
+AUTO_MSG_INTERVAL = 20  # কত সেকেন্ড পর পর মেসেজ দিবে (১৫-২০ সেকেন্ড রিকমেন্ডেড)
+AUTO_MESSAGE_TEXT = """
+**🔔 নিয়মিত আপডেট!**
+
+🎬 নতুন নতুন মুভি পেতে আমাদের সাথেই থাকুন।
+যে কোনো মুভি খুঁজতে মুভির নাম লিখে সার্চ করুন।
+
+✅ জয়েন করুন: @TGLinkBase
+"""
 
 app = Client("movie_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -45,6 +56,7 @@ stats_col = db["stats"]
 users_col = db["users"]
 settings_col = db["settings"]
 requests_col = db["requests"]
+groups_col = db["groups"] # [NEW FEATURE] নতুন কালেকশন গ্রুপগুলোর জন্য
 
 # ইনডেক্সিং
 try:
@@ -94,7 +106,6 @@ def get_readable_time(seconds):
     h, m = divmod(m, 60)
     return f"{int(h):02d}:{int(m):02d}:{int(s):02d}"
 
-# [FIXED] ডিফল্ট টাইম ৩০০ সেকেন্ড (৫ মিনিট) করা হয়েছে সাধারণ মেসেজের জন্য
 async def delete_message_later(chat_id, message_id, delay=300): 
     await asyncio.sleep(delay)
     try:
@@ -120,6 +131,36 @@ def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=70, 
                     })
                     break
     return corrected_suggestions
+
+# [NEW FEATURE] অটোমেটিক গ্রুপ মেসেজ সেন্ডার লুপ
+async def auto_group_messenger():
+    print("✅ অটো গ্রুপ মেসেজ সিস্টেম চালু হয়েছে...")
+    while True:
+        # ডাটাবেস থেকে সব গ্রুপ আইডি নেওয়া
+        all_groups = groups_col.find({})
+        
+        for group in all_groups:
+            chat_id = group["_id"]
+            try:
+                # মেসেজ পাঠানো
+                sent = await app.send_message(chat_id, AUTO_MESSAGE_TEXT)
+                
+                # মেসেজটি কিছুক্ষণ পর ডিলিট করতে চাইলে নিচের লাইন আনকমেন্ট করুন
+                # asyncio.create_task(delete_message_later(chat_id, sent.id, delay=300))
+                
+            except FloodWait as e:
+                await asyncio.sleep(e.value)
+            except (PeerIdInvalid, UserIsBlocked):
+                # বট গ্রুপ থেকে কিক খেলে ডাটাবেস থেকে রিমুভ হবে
+                groups_col.delete_one({"_id": chat_id})
+            except Exception as e:
+                pass
+            
+            # প্রতিটি গ্রুপে পাঠানোর মাঝে ১ সেকেন্ড গ্যাপ (সেফ থাকার জন্য)
+            await asyncio.sleep(1) 
+
+        # লুপ শেষ হওয়ার পর নির্দিষ্ট সময় অপেক্ষা (যেমন ১৫-২০ সেকেন্ড)
+        await asyncio.sleep(AUTO_MSG_INTERVAL)
 
 # ------------------- ব্রডকাস্ট ইঞ্জিন -------------------
 async def broadcast_messages(user_ids, message_func, status_msg=None, total_users=0):
@@ -227,7 +268,6 @@ async def auto_broadcast_worker(movie_title, message_id, thumbnail_id=None):
                 break
             except: pass
 
-    # [FIXED] নোটিফিকেশন মেসেজ ২৪ ঘন্টা (৮৬৪০০ সেকেন্ড) পর ডিলিট হবে
     async def send_func(user_id):
         sent_msg = None
         if thumbnail_id:
@@ -235,7 +275,6 @@ async def auto_broadcast_worker(movie_title, message_id, thumbnail_id=None):
         else:
             sent_msg = await app.send_message(user_id, notification_caption, reply_markup=download_button)
         
-        # এখানে ডিলিট টাস্ক শিডিউল করা হলো
         if sent_msg:
             asyncio.create_task(delete_message_later(sent_msg.chat.id, sent_msg.id, delay=86400)) # 24 Hours
 
@@ -271,6 +310,15 @@ async def save_post(_, msg: Message):
         if setting and setting.get("value"):
             asyncio.create_task(auto_broadcast_worker(movie_title, msg.id, thumbnail_file_id))
 
+# [NEW FEATURE] গ্রুপে মেসেজ দিলে বা বট এড হলে গ্রুপ আইডি সেভ হবে
+@app.on_message(filters.group, group=10)
+async def log_group(_, msg: Message):
+    groups_col.update_one(
+        {"_id": msg.chat.id}, 
+        {"$set": {"title": msg.chat.title, "active": True}}, 
+        upsert=True
+    )
+
 # ------------------- স্টার্ট কমান্ড -------------------
 user_last_start_time = {}
 
@@ -284,7 +332,6 @@ async def start(_, msg: Message):
             return
     user_last_start_time[user_id] = current_time
 
-    # [FIXED] মুভি ওয়াচ লিংক হ্যান্ডলিং
     if len(msg.command) > 1 and msg.command[1].startswith("watch_"):
         message_id = int(msg.command[1].replace("watch_", ""))
         protect_setting = settings_col.find_one({"key": "protect_forwarding"})
@@ -307,7 +354,6 @@ async def start(_, msg: Message):
                     reply_markup=action_buttons,
                     reply_to_message_id=copied_message.id 
                 )
-                # ৫ মিনিট পর ডিলিট (ডিফল্ট)
                 asyncio.create_task(delete_message_later(report_message.chat.id, report_message.id))
                 asyncio.create_task(delete_message_later(copied_message.chat.id, copied_message.id))
             movies_col.update_one(
@@ -337,7 +383,6 @@ Telegram: @ctgmovies23
 Channel: [All Bot Update My](https://t.me/AllBotUpdatemy)""",
         reply_markup=btns
     )
-    # ৫ মিনিট পর ডিলিট (ডিফল্ট)
     asyncio.create_task(delete_message_later(start_message.chat.id, start_message.id))
 
 # ------------------- অ্যাডমিন কমান্ড -------------------
@@ -361,7 +406,6 @@ async def broadcast(_, msg: Message):
     except Exception:
         status_msg = await msg.reply(f"🚀 **ম্যানুয়াল ব্রডকাস্ট শুরু হচ্ছে...**\n👥 মোট টার্গেট: `{total_users}`")
     
-    # ম্যানুয়াল ব্রডকাস্টও ২৪ ঘন্টা পর ডিলিট হবে (ঐচ্ছিক, চাইলে এখানেও logic বসাতে পারেন)
     async def send_func(user_id):
         m = None
         if msg.reply_to_message:
@@ -369,8 +413,6 @@ async def broadcast(_, msg: Message):
         else:
             broadcast_text = msg.text.split(None, 1)[1]
             m = await app.send_message(user_id, broadcast_text, disable_web_page_preview=True)
-        # ম্যানুয়াল ব্রডকাস্ট ডিলিট করতে চাইলে নিচের লাইনটি আনকমেন্ট করুন
-        # if m: asyncio.create_task(delete_message_later(m.chat.id, m.id, delay=86400))
 
     await broadcast_messages(all_user_ids, send_func, status_msg, total_users)
 
@@ -390,8 +432,11 @@ async def feedback(_, msg: Message):
 
 @app.on_message(filters.command("stats") & filters.user(ADMIN_IDS))
 async def stats(_, msg: Message):
+    # [NEW FEATURE] স্ট্যাটসে গ্রুপের সংখ্যা দেখানো
+    total_groups = groups_col.count_documents({})
     stats_msg = await msg.reply(
         f"""মোট ব্যবহারকারী: {users_col.count_documents({})}
+মোট গ্রুপ: {total_groups}
 মোট মুভি: {movies_col.count_documents({})}
 মোট ফিডব্যাক: {feedback_col.count_documents({})}
 মোট অনুরোধ: {requests_col.count_documents({})}"""
@@ -478,7 +523,6 @@ async def handle_admin_reply(_, cq: CallbackQuery):
     
     try:
         m_sent = await app.send_message(user_id, messages[reason])
-        # ৫ মিনিট পর ডিলিট (ডিফল্ট)
         asyncio.create_task(delete_message_later(m_sent.chat.id, m_sent.id))
         await cq.answer("ব্যবহারকারীকে জানানো হয়েছে ✅", show_alert=True)
         btn_text = {
@@ -557,7 +601,9 @@ async def search(_, msg: Message):
     query = msg.text.strip()
     if not query:
         return
-    if msg.chat.type == "group":
+    # [FIXED] গ্রুপে বট মেসেজ রিড করলে আইডি সেভ হবে
+    if msg.chat.type in ["group", "supergroup"]:
+        groups_col.update_one({"_id": msg.chat.id}, {"$set": {"title": msg.chat.title}}, upsert=True)
         if len(query) < 3: return
         if msg.reply_to_message or msg.from_user.is_bot: return
         if not re.search(r'[a-zA-Z0-9]', query): return
@@ -577,7 +623,6 @@ async def search(_, msg: Message):
 
     query_clean = clean_text(query_title_only)
 
-    # ২. Exact Match
     exact_match = list(movies_col.find({"title_clean": query_clean}).limit(RESULTS_COUNT))
     if exact_match:
         await loading_message.delete()
@@ -593,7 +638,6 @@ async def search(_, msg: Message):
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
         return
 
-    # ৩. Starts With
     starts_with_match = list(movies_col.find({
         "title_clean": {"$regex": f"^{re.escape(query_clean)}", "$options": "i"}
     }).limit(RESULTS_COUNT))
@@ -612,7 +656,6 @@ async def search(_, msg: Message):
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
         return
 
-    # ৪. Fuzzy Search
     all_movie_data_cursor = movies_col.find(
         {}, 
         {"title_clean": 1, "original_title": "$title", "message_id": 1, "language": 1, "views_count": 1}
@@ -807,4 +850,6 @@ async def callback_handler(_, cq: CallbackQuery):
 
 if __name__ == "__main__":
     print("বট শুরু হচ্ছে...")
+    # [NEW FEATURE] লুপ ব্যাকগ্রাউন্ডে স্টার্ট করা হচ্ছে
+    app.loop.create_task(auto_group_messenger())
     app.run()
