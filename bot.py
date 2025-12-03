@@ -2,6 +2,7 @@
 # ----------------------------------------------------
 # Developed by: Ctgmovies23
 # Advanced Update: Motor (Async), BS4, Marshmallow, Ujson
+# Fixed: Marshmallow 'missing' arg updated to 'load_default'
 # ----------------------------------------------------
 #
 
@@ -88,7 +89,7 @@ try:
 except Exception as e:
     print(f"⚠️ Index Error: {e}")
 
-# Marshmallow Schema (Data Validation)
+# Marshmallow Schema (Data Validation) - FIXED HERE
 class MovieSchema(Schema):
     message_id = fields.Int(required=True)
     title = fields.Str(required=True)
@@ -96,7 +97,7 @@ class MovieSchema(Schema):
     full_caption = fields.Str()
     year = fields.Int(allow_none=True)
     language = fields.Str(allow_none=True)
-    views_count = fields.Int(missing=0)
+    views_count = fields.Int(load_default=0)  # Fixed: 'missing' changed to 'load_default'
     thumbnail_id = fields.Str(allow_none=True)
     date = fields.DateTime()
 
