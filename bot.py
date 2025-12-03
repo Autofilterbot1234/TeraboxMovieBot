@@ -1,8 +1,8 @@
 #
 # ----------------------------------------------------
 # Developed by: Ctgmovies23
-# Advanced Update: Local DB Priority + Smart Fallback
-# Features: Clean Search + Auto Name Correction + Admin Alert
+# Advanced Update: Local DB Priority + Smart Fallback + Precision Search
+# Features: Clean Search + Auto Name Correction + Year Filter + Admin Alert
 # ----------------------------------------------------
 #
 
@@ -483,7 +483,6 @@ async def search(_, msg: Message):
         await groups_col.update_one({"_id": msg.chat.id}, {"$set": {"title": msg.chat.title, "active": True}}, upsert=True)
         # ২ অক্ষরের নিচে সার্চ করবে না, বট বা রিপ্লাই হলে ইগনোর
         if len(query) < 2 or msg.reply_to_message or msg.from_user.is_bot: return
-        # কমান্ড হলে ইগনোর
         if query.startswith("/"): return
 
     user_id = msg.from_user.id
@@ -496,63 +495,73 @@ async def search(_, msg: Message):
 
     loading_message = await msg.reply("🔎 <b>Searching...</b>", quote=True)
     
-    # --- [STEP 1] --- ইউজার ইনপুট ক্লিন করা (গারবেজ রিমুভ)
+    # --- [STEP 1] --- ইউজার ইনপুট প্রসেসিং
+    raw_year = extract_year(query)
     cleaned_query = smart_search_clean(query)
+    
     if not cleaned_query:
         cleaned_query = query.lower()
 
     search_source = ""
     results = []
     
-    # --- [STEP 2] --- লোকাল ডাটাবেস সার্চ (Priority 1)
-    # প্রথমে TMDB তে না গিয়ে সরাসরি ডাটাবেসে খুঁজবে
+    # --- [STEP 2] --- লোকাল ডাটাবেস সার্চ (Priority Logic)
+
+    # লজিক ১: হুবহু মিল বা Word Boundary (সবচেয়ে সঠিক রেজাল্ট)
+    # \b ব্যবহার করায় "Man" খুঁজলে "Superman" আসবে না।
+    regex_pattern = r"\b" + re.escape(cleaned_query) + r"\b"
     
-    # Regex দিয়ে সার্চ (যেকোনো জায়গায় ম্যাচ করবে)
-    regex_pattern = re.escape(cleaned_query)
+    query_filter = {
+        "$or": [
+            {"title_clean": {"$regex": regex_pattern, "$options": "i"}},
+            {"title": {"$regex": regex_pattern, "$options": "i"}}
+        ]
+    }
     
-    db_cursor = movies_col.find({
-        "title_clean": {"$regex": regex_pattern, "$options": "i"}
-    }).sort("views_count", -1).limit(RESULTS_COUNT)
+    # যদি ইউজার বছর উল্লেখ করে, তবে বছরের ফিল্টার যুক্ত হবে
+    if raw_year:
+        query_filter["year"] = raw_year
     
+    db_cursor = movies_col.find(query_filter).sort("views_count", -1).limit(RESULTS_COUNT)
     results = await db_cursor.to_list(length=RESULTS_COUNT)
 
-    # যদি ক্লিন টাইটেলে না পায়, অরিজিনাল টাইটেল বা ক্যাপশনে খোঁজা
-    if not results:
+    # লজিক ২: যদি একদম এক্সাক্ট না পাওয়া যায় এবং বছর উল্লেখ না থাকে
+    if not results and not raw_year:
+        loose_pattern = re.escape(cleaned_query)
         db_cursor = movies_col.find({
-            "$or": [
-                {"title": {"$regex": regex_pattern, "$options": "i"}},
-                {"full_caption": {"$regex": regex_pattern, "$options": "i"}}
-            ]
+            "title_clean": {"$regex": loose_pattern, "$options": "i"}
         }).sort("views_count", -1).limit(RESULTS_COUNT)
         results = await db_cursor.to_list(length=RESULTS_COUNT)
 
     # --- [STEP 3] --- TMDB / Auto Correct (Priority 2)
-    # যদি লোকাল সার্চে কিছুই না পাওয়া যায়, তখন TMDB বা গুগল কারেকশন দেখবে
     tmdb_detected_title = None
     
     if not results:
         tmdb_detected_title = await get_tmdb_suggestion(cleaned_query)
         if tmdb_detected_title:
             tmdb_clean = clean_text(tmdb_detected_title)
+            # TMDB এর রেজাল্ট দিয়ে আবার Word Boundary সার্চ
+            tmdb_regex = r"\b" + re.escape(tmdb_clean) + r"\b"
             db_cursor = movies_col.find({
-                "title_clean": {"$regex": re.escape(tmdb_clean), "$options": "i"}
+                "title_clean": {"$regex": tmdb_regex, "$options": "i"}
             }).sort("views_count", -1).limit(RESULTS_COUNT)
             results = await db_cursor.to_list(length=RESULTS_COUNT)
             if results:
                 search_source = f"✅ **Auto Corrected:** '{tmdb_detected_title}'"
 
-    # --- [STEP 4] --- Fuzzy Logic (Priority 3)
-    if not results:
+    # --- [STEP 4] --- Fuzzy Logic (Priority 3 - শুধুমাত্র শেষ ভরসা)
+    # ফাজি সার্চ স্কোর ৭০ থেকে ৮৫ করা হয়েছে আলতু ফালতু রেজাল্ট এড়াতে
+    if not results and not raw_year:
         all_movie_data = await movies_col.find({}, {"title_clean": 1, "original_title": "$title", "message_id": 1, "views_count": 1}).to_list(length=None)
         
         corrected_suggestions = await asyncio.get_event_loop().run_in_executor(
-            thread_pool_executor, find_corrected_matches, cleaned_query, all_movie_data, 70, RESULTS_COUNT
+            thread_pool_executor, find_corrected_matches, cleaned_query, all_movie_data, 85, RESULTS_COUNT
         )
         
-        # TMDB রেজাল্ট দিয়ে ফাজি ট্রাই
+        # TMDB রেজাল্ট দিয়ে ফাজি ট্রাই (যদি থাকে)
         if not corrected_suggestions and tmdb_detected_title:
              corrected_suggestions = await asyncio.get_event_loop().run_in_executor(
-                thread_pool_executor, find_corrected_matches, clean_text(tmdb_detected_title), all_movie_data, 75, RESULTS_COUNT
+                thread_pool_executor, find_corrected_matches, clean_text(tmdb_detected_title), all_movie_data, 85, RESULTS_COUNT
             )
 
         if corrected_suggestions:
