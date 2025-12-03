@@ -1,8 +1,8 @@
 #
 # ----------------------------------------------------
 # Developed by: Ctgmovies23
-# Final Fix: Commands Priority + Smart Search + User Suggestion UI
-# Status: 100% Verified & Updated
+# Final Fix: Smart Auto-Correction + DB Re-Search Logic
+# Status: 100% Verified & Ready
 # ----------------------------------------------------
 #
 
@@ -666,37 +666,52 @@ async def search(_, msg: Message):
         }).sort("views_count", -1).limit(RESULTS_COUNT)
         results = await db_cursor.to_list(length=RESULTS_COUNT)
 
-    # Priority 3: TMDB
+    # -------------------------------------------------------------------------
+    # Priority 3: TMDB Search & Auto-Fix Logic (UPDATED)
+    # -------------------------------------------------------------------------
     tmdb_detected_title = None
     if not results:
+        # ১. আগে TMDB থেকে সঠিক নামটা আনবো
         tmdb_detected_title = await get_tmdb_suggestion(cleaned_query)
+        
         if tmdb_detected_title:
             tmdb_clean = clean_text(tmdb_detected_title)
-            tmdb_regex = r"\b" + re.escape(tmdb_clean) + r"\b"
+            
+            # ২. প্রথমে একটু লুজ (Loose) সার্চ করবো ফিক্স করা নাম দিয়ে
             db_cursor = movies_col.find({
-                "title_clean": {"$regex": tmdb_regex, "$options": "i"}
+                "$or": [
+                    {"title_clean": {"$regex": re.escape(tmdb_clean), "$options": "i"}},
+                    {"title": {"$regex": re.escape(tmdb_detected_title), "$options": "i"}}
+                ]
             }).sort("views_count", -1).limit(RESULTS_COUNT)
+            
             results = await db_cursor.to_list(length=RESULTS_COUNT)
+            
             if results:
                 search_source = f"✅ **Auto Corrected:** '{tmdb_detected_title}'"
+            
+            # ৩. যদি লুজ সার্চেও না পায়, তাহলে ফিক্স করা নাম দিয়েই Fuzzy Search চালাবো
+            else:
+                all_movie_data = await movies_col.find({}, {"title_clean": 1, "original_title": "$title", "message_id": 1, "views_count": 1}).to_list(length=None)
+                tmdb_fuzzy_results = await asyncio.get_event_loop().run_in_executor(
+                    thread_pool_executor, find_corrected_matches, tmdb_clean, all_movie_data, 80, RESULTS_COUNT
+                )
+                if tmdb_fuzzy_results:
+                    results = tmdb_fuzzy_results
+                    search_source = f"✅ **Auto Corrected:** '{tmdb_detected_title}'"
 
-    # Priority 4: Fuzzy (High Score 85)
-    if not results and not raw_year:
+    # Priority 4: Fuzzy Logic (User input দিয়ে শেষ চেষ্টা)
+    if not results and not raw_year and not tmdb_detected_title:
         all_movie_data = await movies_col.find({}, {"title_clean": 1, "original_title": "$title", "message_id": 1, "views_count": 1}).to_list(length=None)
         corrected_suggestions = await asyncio.get_event_loop().run_in_executor(
-            thread_pool_executor, find_corrected_matches, cleaned_query, all_movie_data, 85, RESULTS_COUNT
+            thread_pool_executor, find_corrected_matches, cleaned_query, all_movie_data, 80, RESULTS_COUNT
         )
-        
-        if not corrected_suggestions and tmdb_detected_title:
-             corrected_suggestions = await asyncio.get_event_loop().run_in_executor(
-                thread_pool_executor, find_corrected_matches, clean_text(tmdb_detected_title), all_movie_data, 85, RESULTS_COUNT
-            )
 
         if corrected_suggestions:
             results = corrected_suggestions
             search_source = f"🤔 আপনি কি **{corrected_suggestions[0]['title']}** খুঁজছেন?"
 
-    # ফলাফল প্রদান
+    # ফলাফল প্রদান (Results Found)
     if results:
         await loading_message.delete()
         header_text = f"🎬 **আপনার মুভি পাওয়া গেছে:**\n{search_source}" if search_source else "🎬 **আপনার মুভি পাওয়া গেছে:**"
@@ -714,7 +729,6 @@ async def search(_, msg: Message):
     
     Google_Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(final_query)
     
-    # Request বাটনে এখন সঠিক নাম (যদি পাওয়া যায়) ব্যবহার করা হবে
     req_btn = InlineKeyboardButton(
         f"✅ রিকোয়েস্ট করুন", 
         callback_data=f"request_movie_{user_id}_{encoded_final_query}"
@@ -722,7 +736,7 @@ async def search(_, msg: Message):
     google_btn = InlineKeyboardButton("🌐 গুগলে দেখুন", url=Google_Search_url)
     
     if tmdb_detected_title:
-        # কেস ১: ইউজার ভুল লিখেছে, বোট সঠিক নাম পেয়েছে, কিন্তু ফাইল ডাটাবেসে নেই
+        # কেস ১: ইউজার ভুল লিখেছে, বোট সঠিক নাম পেয়েছে, কিন্তু সেই নামেও ডাটাবেসে ফাইল নেই
         alert_text = (
             f"❌ **'{query}'** পাওয়া যায়নি।\n\n"
             f"💡 **আপনি কি এটি খুঁজছিলেন?**\n"
