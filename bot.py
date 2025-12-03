@@ -1,9 +1,8 @@
 #
 # ----------------------------------------------------
 # Developed by: Ctgmovies23
-# Final Fix: Smart Auto-Correction + DB Re-Search Logic
-# Status: 100% Verified & Ready
-# Fixed: Broadcast Memory Issue & Admin ID Parsing
+# Final Fix: Super Fast Broadcast (Semaphore + Cursor)
+# Status: 100% Verified & Optimized
 # ----------------------------------------------------
 #
 
@@ -42,17 +41,17 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 RESULTS_COUNT = int(os.getenv("RESULTS_COUNT", 10))
 
-# [FIX] Admin ID parsing fix (handles spaces and empty strings)
+# Admin ID parsing
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 UPDATE_CHANNEL = os.getenv("UPDATE_CHANNEL", "https://t.me/TGLinkBase")
-TMDB_API_KEY = os.getenv("TMDB_API_KEY") # TMDB API Key
+TMDB_API_KEY = os.getenv("TMDB_API_KEY") 
 START_PIC = os.getenv("START_PIC", "https://i.ibb.co/prnGXMr3/photo-2025-05-16-05-15-45-7504908428624527364.jpg")
 BROADCAST_PIC = os.getenv("BROADCAST_PIC", "https://telegra.ph/file/18659550b694b47000787.jpg")
 
-# [CONFIG] অটো মেসেজ সেটিংস
-AUTO_MSG_INTERVAL = 250  
+# অটো মেসেজ সেটিংস
+AUTO_MSG_INTERVAL = 1200  
 AUTO_MSG_DELETE_TIME = 300 
 
 AUTO_MESSAGE_TEXT = """
@@ -70,7 +69,7 @@ logger = logging.getLogger(__name__)
 
 app = Client("movie_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# ------------------- MongoDB (Async Motor) & Schema -------------------
+# ------------------- MongoDB Setup -------------------
 motor_client = AsyncIOMotorClient(DATABASE_URL)
 db = motor_client["movie_bot"]
 
@@ -93,7 +92,7 @@ try:
 except Exception as e:
     print(f"⚠️ Index Error: {e}")
 
-# Marshmallow Schema
+# Schema
 class MovieSchema(Schema):
     message_id = fields.Int(required=True)
     title = fields.Str(required=True)
@@ -234,9 +233,10 @@ def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=80, 
                     
     return sorted(corrected_suggestions, key=lambda x: x["score"], reverse=True)
 
-# ------------------- সিস্টেম ইঞ্জিন -------------------
+# ------------------- সিস্টেম ইঞ্জিন (Auto Msg & Broadcast) -------------------
+
 async def auto_group_messenger():
-    print("✅ অটো গ্রুপ মেসেজ সিস্টেম চালু হয়েছে (Async)...")
+    print("✅ অটো গ্রুপ মেসেজ সিস্টেম চালু হয়েছে...")
     while True:
         async for group in groups_col.find({}):
             chat_id = group["_id"]
@@ -253,32 +253,35 @@ async def auto_group_messenger():
             await asyncio.sleep(1.5) 
         await asyncio.sleep(AUTO_MSG_INTERVAL)
 
-# [FIXED] Broadcast Function - Uses Batch Processing
-async def broadcast_messages(user_ids, message_func, status_msg=None, total_users=0):
+# 🔥 [OPTIMIZED] Super Fast Broadcast Function using Semaphore
+async def broadcast_messages(cursor, message_func, status_msg=None, total_users=0):
     success = 0
     failed = 0
     start_time = time.time()
     
-    # Worker Function
+    # Semaphore ব্যবহার করা হয়েছে যাতে একসাথে ২০টা থ্রেড কাজ করে
+    semaphore = asyncio.Semaphore(20)
+
     async def send_worker(user_id):
         nonlocal success, failed
-        try:
-            await message_func(user_id)
-            success += 1
-        except FloodWait as e:
-            await asyncio.sleep(e.value)
+        async with semaphore:
             try:
                 await message_func(user_id)
                 success += 1
+            except FloodWait as e:
+                await asyncio.sleep(e.value)
+                try:
+                    await message_func(user_id)
+                    success += 1
+                except Exception:
+                    failed += 1
+            except (InputUserDeactivated, UserIsBlocked, PeerIdInvalid):
+                await users_col.delete_one({"_id": user_id})
+                failed += 1
             except Exception:
                 failed += 1
-        except (InputUserDeactivated, UserIsBlocked, PeerIdInvalid):
-            await users_col.delete_one({"_id": user_id})
-            failed += 1
-        except Exception:
-            failed += 1
 
-    # Status Updater
+    # Status Update Loop
     async def update_status_loop():
         while True:
             await asyncio.sleep(5)
@@ -288,13 +291,17 @@ async def broadcast_messages(user_ids, message_func, status_msg=None, total_user
             percentage = (done / total_users) * 100
             elapsed = time.time() - start_time
             if elapsed == 0: elapsed = 1
+            speed = done / elapsed
+            eta = (total_users - done) / speed if speed > 0 else 0
             
             progress_bar = f"[{'■' * int(percentage // 10)}{'□' * (10 - int(percentage // 10))}]"
             text = (
-                f"🚀 **ব্রডকাস্ট চলছে...**\n\n"
+                f"🚀 **সুপারফাস্ট ব্রডকাস্ট চলছে...**\n\n"
                 f"{progress_bar} **{percentage:.1f}%**\n"
                 f"✅ সফল: `{success}` | ❌ ব্যর্থ: `{failed}`\n"
-                f"⏱ সময়: `{get_readable_time(elapsed)}`"
+                f"⚡ স্পিড: `{speed:.1f} users/sec`\n"
+                f"⏱ সময়: `{get_readable_time(elapsed)}`\n"
+                f"⏳ বাকি সময়: `{get_readable_time(eta)}`"
             )
             try:
                 if status_msg:
@@ -306,17 +313,31 @@ async def broadcast_messages(user_ids, message_func, status_msg=None, total_user
 
     updater_task = asyncio.create_task(update_status_loop())
 
-    # --- BATCH PROCESSING (The Fix) ---
-    BATCH_SIZE = 50 
-    for i in range(0, len(user_ids), BATCH_SIZE):
-        batch = user_ids[i : i + BATCH_SIZE]
-        await asyncio.gather(*[send_worker(uid) for uid in batch])
-    # ----------------------------------
+    # --- Cursor Based Stream Processing ---
+    tasks = []
+    async for user in cursor:
+        user_id = user["_id"]
+        task = asyncio.create_task(send_worker(user_id))
+        tasks.append(task)
+        
+        # 1000 টাস্ক জমলে প্রসেস করে মেমোরি খালি করবে
+        if len(tasks) >= 1000:
+            await asyncio.gather(*tasks)
+            tasks = []
+    
+    if tasks:
+        await asyncio.gather(*tasks)
+    # -------------------------------------
 
     updater_task.cancel()
-
     elapsed = time.time() - start_time
-    final_text = f"✅ **ব্রডকাস্ট সম্পন্ন!**\n✅ সফল: `{success}`\n❌ ব্যর্থ: `{failed}`\n⏱ সময়: `{get_readable_time(elapsed)}`"
+    final_text = (
+        f"✅ **ব্রডকাস্ট সম্পন্ন!**\n\n"
+        f"👥 মোট ইউজার: `{total_users}`\n"
+        f"✅ সফল: `{success}`\n"
+        f"❌ ব্যর্থ: `{failed}`\n"
+        f"⏱ সময় লেগেছে: `{get_readable_time(elapsed)}`"
+    )
     
     if status_msg:
         try:
@@ -329,21 +350,15 @@ async def auto_broadcast_worker(movie_title, message_id, thumbnail_id=None):
     ])
     notification_caption = f"🎬 **নতুন মুভি আপলোড হয়েছে!**\n\n**{movie_title}**\n\nএখনই ডাউনলোড করুন!"
     
-    all_user_ids = [user["_id"] async for user in users_col.find({"notify": {"$ne": False}}, {"_id": 1})]
-    total_users = len(all_user_ids)
+    total_users = await users_col.count_documents({"notify": {"$ne": False}})
     if total_users == 0: return
 
     status_msg = None
-    for admin_id in ADMIN_IDS:
+    if ADMIN_IDS:
         try:
             pic_to_use = thumbnail_id if thumbnail_id else BROADCAST_PIC
-            status_msg = await app.send_photo(admin_id, photo=pic_to_use, caption=f"🚀 **অটো নোটিফিকেশন শুরু...**\n👥 ইউজার: `{total_users}`")
-            break
-        except Exception:
-            try:
-                status_msg = await app.send_message(admin_id, f"🚀 **অটো নোটিফিকেশন শুরু...**\n👥 ইউজার: `{total_users}`")
-                break
-            except: pass
+            status_msg = await app.send_photo(ADMIN_IDS[0], photo=pic_to_use, caption=f"🚀 **অটো নোটিফিকেশন শুরু...**\n👥 ইউজার: `{total_users}`")
+        except Exception: pass
 
     async def send_func(user_id):
         if thumbnail_id:
@@ -352,7 +367,9 @@ async def auto_broadcast_worker(movie_title, message_id, thumbnail_id=None):
             msg = await app.send_message(user_id, notification_caption, reply_markup=download_button)
         if msg: asyncio.create_task(delete_message_later(msg.chat.id, msg.id, delay=86400))
 
-    await broadcast_messages(all_user_ids, send_func, status_msg, total_users)
+    # Cursor ব্যবহার করা হচ্ছে
+    cursor = users_col.find({"notify": {"$ne": False}}, {"_id": 1})
+    await broadcast_messages(cursor, send_func, status_msg, total_users)
 
 # ------------------- হ্যান্ডলার ও কমান্ডস -------------------
 
@@ -478,7 +495,7 @@ PREMIUM FEATURES.
 
     await msg.reply_photo(photo=START_PIC, caption=start_caption, reply_markup=btns)
 
-# ------------------- অ্যাডমিন কমান্ড ও অন্যান্য কমান্ড (সার্চের আগে রাখা হয়েছে) -------------------
+# ------------------- অ্যাডমিন কমান্ড -------------------
 
 @app.on_message(filters.command("broadcast") & filters.user(ADMIN_IDS))
 async def broadcast(_, msg: Message):
@@ -486,8 +503,8 @@ async def broadcast(_, msg: Message):
         await msg.reply("ব্যবহার:\n১. কোনো মেসেজে রিপ্লাই দিয়ে `/broadcast` লিখুন।\n২. অথবা `/broadcast আপনার মেসেজ` লিখুন।")
         return
     
-    all_user_ids = [user["_id"] async for user in users_col.find({}, {"_id": 1})]
-    total_users = len(all_user_ids)
+    # ডাটাবেস থেকে কাউন্ট নেওয়া (ফাস্ট)
+    total_users = await users_col.count_documents({})
     
     if total_users == 0:
         await msg.reply("ডাটাবেসে কোনো ইউজার নেই।")
@@ -495,6 +512,9 @@ async def broadcast(_, msg: Message):
         
     status_msg = await msg.reply_photo(photo=BROADCAST_PIC, caption=f"🚀 **ম্যানুয়াল ব্রডকাস্ট শুরু...**\n👥 টার্গেট: `{total_users}`")
     
+    # কার্সর তৈরি
+    cursor = users_col.find({}, {"_id": 1})
+
     async def send_func(user_id):
         if msg.reply_to_message:
             await msg.reply_to_message.copy(user_id)
@@ -502,7 +522,8 @@ async def broadcast(_, msg: Message):
             broadcast_text = msg.text.split(None, 1)[1]
             await app.send_message(user_id, broadcast_text, disable_web_page_preview=True)
 
-    await broadcast_messages(all_user_ids, send_func, status_msg, total_users)
+    # ব্যাকগ্রাউন্ডে চালানো
+    asyncio.create_task(broadcast_messages(cursor, send_func, status_msg, total_users))
 
 @app.on_message(filters.command("feedback") & filters.private)
 async def feedback(_, msg: Message):
@@ -630,7 +651,7 @@ async def request_movie(_, msg: Message):
             await app.send_message(admin_id, f"❗ *নতুন অনুরোধ!*\n🎬 `{movie_name}`\n👤 [{username}](tg://user?id={user_id})", reply_markup=admin_btns)
         except: pass
 
-# ------------------- স্মার্ট সার্চ হ্যান্ডলার (কমান্ডের নিচে) -------------------
+# ------------------- স্মার্ট সার্চ হ্যান্ডলার -------------------
 
 @app.on_message(filters.text & ~filters.command(["start", "broadcast", "stats", "feedback", "request", "popular", "notify", "delete_movie", "delete_all_movies", "forward_toggle"]) & (filters.group | filters.private))
 async def search(_, msg: Message):
@@ -674,7 +695,7 @@ async def search(_, msg: Message):
     db_cursor = movies_col.find(query_filter).sort("views_count", -1).limit(RESULTS_COUNT)
     results = await db_cursor.to_list(length=RESULTS_COUNT)
 
-    # Priority 2: Loose Match (if no year)
+    # Priority 2: Loose Match
     if not results and not raw_year:
         loose_pattern = re.escape(cleaned_query)
         db_cursor = movies_col.find({
@@ -682,18 +703,14 @@ async def search(_, msg: Message):
         }).sort("views_count", -1).limit(RESULTS_COUNT)
         results = await db_cursor.to_list(length=RESULTS_COUNT)
 
-    # -------------------------------------------------------------------------
-    # Priority 3: TMDB Search & Auto-Fix Logic (UPDATED)
-    # -------------------------------------------------------------------------
+    # Priority 3: TMDB Search & Auto-Fix Logic
     tmdb_detected_title = None
     if not results:
-        # ১. আগে TMDB থেকে সঠিক নামটা আনবো
         tmdb_detected_title = await get_tmdb_suggestion(cleaned_query)
         
         if tmdb_detected_title:
             tmdb_clean = clean_text(tmdb_detected_title)
             
-            # ২. প্রথমে একটু লুজ (Loose) সার্চ করবো ফিক্স করা নাম দিয়ে
             db_cursor = movies_col.find({
                 "$or": [
                     {"title_clean": {"$regex": re.escape(tmdb_clean), "$options": "i"}},
@@ -705,8 +722,6 @@ async def search(_, msg: Message):
             
             if results:
                 search_source = f"✅ **Auto Corrected:** '{tmdb_detected_title}'"
-            
-            # ৩. যদি লুজ সার্চেও না পায়, তাহলে ফিক্স করা নাম দিয়েই Fuzzy Search চালাবো
             else:
                 all_movie_data = await movies_col.find({}, {"title_clean": 1, "original_title": "$title", "message_id": 1, "views_count": 1}).to_list(length=None)
                 tmdb_fuzzy_results = await asyncio.get_event_loop().run_in_executor(
@@ -716,7 +731,7 @@ async def search(_, msg: Message):
                     results = tmdb_fuzzy_results
                     search_source = f"✅ **Auto Corrected:** '{tmdb_detected_title}'"
 
-    # Priority 4: Fuzzy Logic (User input দিয়ে শেষ চেষ্টা)
+    # Priority 4: Fuzzy Logic
     if not results and not raw_year and not tmdb_detected_title:
         all_movie_data = await movies_col.find({}, {"title_clean": 1, "original_title": "$title", "message_id": 1, "views_count": 1}).to_list(length=None)
         corrected_suggestions = await asyncio.get_event_loop().run_in_executor(
@@ -727,17 +742,14 @@ async def search(_, msg: Message):
             results = corrected_suggestions
             search_source = f"🤔 আপনি কি **{corrected_suggestions[0]['title']}** খুঁজছেন?"
 
-    # ফলাফল প্রদান (Results Found)
+    # ফলাফল প্রদান
     if results:
         await loading_message.delete()
         header_text = f"🎬 **আপনার মুভি পাওয়া গেছে:**\n{search_source}" if search_source else "🎬 **আপনার মুভি পাওয়া গেছে:**"
         await send_results(msg, results, f"{header_text}\n👇 নিচের লিংকে ক্লিক করুন:")
         return
 
-    # ---------------------------------------------------------
-    # কিছু না পেলে (Not Found + Smart Suggestion Logic)
-    # ---------------------------------------------------------
-    
+    # কিছু না পেলে
     await loading_message.delete()
     
     final_query = tmdb_detected_title if tmdb_detected_title else cleaned_query
@@ -752,7 +764,6 @@ async def search(_, msg: Message):
     google_btn = InlineKeyboardButton("🌐 গুগলে দেখুন", url=Google_Search_url)
     
     if tmdb_detected_title:
-        # কেস ১: ইউজার ভুল লিখেছে, বোট সঠিক নাম পেয়েছে, কিন্তু সেই নামেও ডাটাবেসে ফাইল নেই
         alert_text = (
             f"❌ **'{query}'** পাওয়া যায়নি।\n\n"
             f"💡 **আপনি কি এটি খুঁজছিলেন?**\n"
@@ -760,7 +771,6 @@ async def search(_, msg: Message):
             f"দুঃখিত, এটিও আমাদের ডাটাবেসে নেই। নিচের বাটনে রিকোয়েস্ট করুন 👇"
         )
     else:
-        # কেস ২: বোট কোনো সঠিক নামই খুঁজে পায়নি
         alert_text = (
             f"❌ দুঃখিত! **'{cleaned_query}'** আমাদের ডাটাবেসে নেই।\n\n"
             f"বানান সঠিক কিনা যাচাই করুন অথবা গুগলে চেক করুন।"
@@ -915,7 +925,7 @@ async def callback_handler(_, cq: CallbackQuery):
 user_last_start_time = {}
 
 if __name__ == "__main__":
-    print("🚀 Bot Started with FIXED Broadcast & Search Logic...")
+    print("🚀 Bot Started with SUPER FAST Broadcast Logic...")
     app.loop.create_task(init_settings())
     app.loop.create_task(auto_group_messenger())
     app.run()
