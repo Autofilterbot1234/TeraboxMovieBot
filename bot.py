@@ -1,7 +1,7 @@
 #
 # ----------------------------------------------------
 # Developed by: Ctgmovies23
-# Advanced Update: Smart Title Detection + TMDB Verify
+# Advanced Update: Local DB Priority + Smart Fallback
 # Features: Clean Search + Auto Name Correction + Admin Alert
 # ----------------------------------------------------
 #
@@ -121,7 +121,7 @@ thread_pool_executor = ThreadPoolExecutor(max_workers=5)
 
 # ------------------- হেল্পার ফাংশন (Smart Stop Words & Cleaning) -------------------
 
-# [UPDATED] বিশাল স্টপ ওয়ার্ডস লিস্ট (গারবেজ ক্লিনিং এর জন্য)
+# [UPDATED] বিশাল স্টপ ওয়ার্ডস লিস্ট
 STOP_WORDS = [
     "movie", "movies", "film", "films", "cinema", "show", "series", "season", "episode", 
     "full", "link", "links", "download", "watch", "online", "free", "all", "part", "url",
@@ -151,32 +151,18 @@ def clean_text(text):
 def smart_search_clean(text):
     """
     ইউজার ইনপুট ক্লিন করার জন্য স্মার্ট ফাংশন।
-    এটি রেজুলেশন, সাল, সিজন কোড এবং স্টপ ওয়ার্ডস রিমুভ করে আসল নাম বের করে।
     """
     text = text.lower()
-    
-    # 1. ব্র্যাকেটের ভিতরের সব কন্টেন্ট রিমুভ (যেমন: [1080p] বা (2023))
     text = re.sub(r'\[.*?\]', '', text)
     text = re.sub(r'\(.*?\)', '', text)
-    
-    # 2. রেজুলেশন এবং কোয়ালিটি রিমুভ
     text = re.sub(r'\b(480p|720p|1080p|2160p|4k|8k|hd|fhd|bluray|web-dl|webrip|camrip|dvdscr)\b', '', text)
-    
-    # 3. সাল রিমুভ (1900-2099)
     text = re.sub(r'\b(19|20)\d{2}\b', '', text)
-    
-    # 4. সিজন এবং এপিসোড কোড রিমুভ (S01E01, Season 1, etc.)
     text = re.sub(r'\bs\d{1,2}(e\d{1,2})?\b', '', text)
     text = re.sub(r'\bseason\s?\d{1,2}\b', '', text)
     text = re.sub(r'\bepisode\s?\d{1,3}\b', '', text)
-    
-    # 5. স্পেশাল ক্যারেক্টার রিমুভ
     text = re.sub(r'[^a-z0-9\s]', ' ', text)
-    
-    # 6. Stop Words রিমুভ
     words = text.split()
     clean_words = [w for w in words if w not in STOP_WORDS and len(w) > 1]
-    
     return " ".join(clean_words).strip()
 
 def extract_language(text):
@@ -210,10 +196,6 @@ async def delete_message_later(chat_id, message_id, delay=300):
 # ------------------- External APIs (TMDB & Google) -------------------
 
 async def get_tmdb_suggestion(query):
-    """
-    TMDB থেকে মুভির আসল নাম বের করার জন্য।
-    ইউজারের ভুল নাম বা অতিরিক্ত শব্দ বাদ দিয়ে এটি সঠিক টাইটেল রিটার্ন করবে।
-    """
     if not TMDB_API_KEY: return None
     url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={urllib.parse.quote(query)}&page=1"
     try:
@@ -222,28 +204,10 @@ async def get_tmdb_suggestion(query):
                 if resp.status == 200:
                     data = await resp.json()
                     if data.get("results"):
-                        # সবচেয়ে ভালো রেজাল্টটি নেওয়া হচ্ছে
                         first_match = data["results"][0]
                         return first_match.get("title") or first_match.get("name") or first_match.get("original_title")
     except Exception as e:
         logger.error(f"TMDB Error: {e}")
-    return None
-
-async def google_spell_check(query):
-    search_url = f"https://www.google.com/search?q={urllib.parse.quote(query)}"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(search_url, headers=headers) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, "html.parser")
-                    correction = soup.find("a", {"class": "gL9Hy"}) or soup.find("a", {"class": "KcIKMc"})
-                    if correction:
-                        corrected_text = correction.get_text()
-                        return corrected_text.replace("Showing results for", "").strip()
-    except Exception as e:
-        logger.error(f"BS4 Error: {e}")
     return None
 
 def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=80, limit=5):
@@ -508,8 +472,7 @@ PREMIUM FEATURES.
 
     await msg.reply_photo(photo=START_PIC, caption=start_caption, reply_markup=btns)
 
-# ------------------- স্মার্ট সার্চ হ্যান্ডলার (Strict Mode + TMDB) -------------------
-# এই অংশটি সম্পূর্ণ আপডেট করা হয়েছে আপনার রিকোয়ারমেন্ট অনুযায়ী
+# ------------------- স্মার্ট সার্চ হ্যান্ডলার (FIXED LOGIC) -------------------
 
 @app.on_message(filters.text & (filters.group | filters.private))
 async def search(_, msg: Message):
@@ -518,78 +481,95 @@ async def search(_, msg: Message):
     
     if msg.chat.type in ["group", "supergroup"]:
         await groups_col.update_one({"_id": msg.chat.id}, {"$set": {"title": msg.chat.title, "active": True}}, upsert=True)
-        # ৩ অক্ষরের নিচে সার্চ করবে না, বট বা রিপ্লাই হলে ইগনোর
-        if len(query) < 3 or msg.reply_to_message or msg.from_user.is_bot: return
-        if not re.search(r'[a-zA-Z0-9]', query): return
+        # ২ অক্ষরের নিচে সার্চ করবে না, বট বা রিপ্লাই হলে ইগনোর
+        if len(query) < 2 or msg.reply_to_message or msg.from_user.is_bot: return
+        # কমান্ড হলে ইগনোর
+        if query.startswith("/"): return
 
     user_id = msg.from_user.id
-    # ইউজারের লাস্ট সার্চ আপডেট
+    
     await users_col.update_one(
         {"_id": user_id},
         {"$set": {"last_query": query}, "$setOnInsert": {"joined": datetime.now(timezone.utc)}},
         upsert=True
     )
 
-    loading_message = await msg.reply("🔎 <b>Smart Searching...</b>", quote=True)
+    loading_message = await msg.reply("🔎 <b>Searching...</b>", quote=True)
     
     # --- [STEP 1] --- ইউজার ইনপুট ক্লিন করা (গারবেজ রিমুভ)
-    # যেমন: "Avengers Endgame full movie 1080p link" -> "avengers endgame"
     cleaned_query = smart_search_clean(query)
     if not cleaned_query:
-        # যদি সব শব্দ রিমুভ হয়ে যায়, তাহলে আসলটা দিয়েই ট্রাই করবে
         cleaned_query = query.lower()
 
-    # --- [STEP 2] --- TMDB থেকে আসল নাম ডিটেক্ট করা
-    # এটি "avengers endgame" সার্চ করে TMDB থেকে "Avengers: Endgame" টাইটেল নিয়ে আসবে
-    tmdb_detected_title = await get_tmdb_suggestion(cleaned_query)
-    
-    final_search_term = None
     search_source = ""
-
-    if tmdb_detected_title:
-        # যদি TMDB রেজাল্ট পায়, তাহলে সেই টাইটেল দিয়ে আমাদের ডাটাবেস খুঁজবে
-        tmdb_clean_db_format = clean_text(tmdb_detected_title)
-        final_search_term = tmdb_clean_db_format
-        search_source = f"🎬 **Found via TMDB:** '{tmdb_detected_title}'"
-    else:
-        # TMDB তে না পেলে, ক্লিন করা নাম দিয়ে খুঁজবে
-        clean_db_format = clean_text(cleaned_query)
-        final_search_term = clean_db_format
-        search_source = f"🔍 **Searching for:** '{cleaned_query}'"
-
-    # --- [STEP 3] --- ডাটাবেস সার্চ (Exact Match & Regex)
-    # প্রথমে Exact Match ট্রাই করবে
-    db_cursor = movies_col.find({"title_clean": final_search_term}).limit(RESULTS_COUNT)
+    results = []
+    
+    # --- [STEP 2] --- লোকাল ডাটাবেস সার্চ (Priority 1)
+    # প্রথমে TMDB তে না গিয়ে সরাসরি ডাটাবেসে খুঁজবে
+    
+    # Regex দিয়ে সার্চ (যেকোনো জায়গায় ম্যাচ করবে)
+    regex_pattern = re.escape(cleaned_query)
+    
+    db_cursor = movies_col.find({
+        "title_clean": {"$regex": regex_pattern, "$options": "i"}
+    }).sort("views_count", -1).limit(RESULTS_COUNT)
+    
     results = await db_cursor.to_list(length=RESULTS_COUNT)
 
-    # যদি Exact Match না পায়, তাহলে Regex (StartsWith) ট্রাই করবে
+    # যদি ক্লিন টাইটেলে না পায়, অরিজিনাল টাইটেল বা ক্যাপশনে খোঁজা
     if not results:
-        regex_cursor = movies_col.find({
-            "title_clean": {"$regex": f"^{re.escape(final_search_term)}", "$options": "i"}
-        }).limit(RESULTS_COUNT)
-        results = await regex_cursor.to_list(length=RESULTS_COUNT)
+        db_cursor = movies_col.find({
+            "$or": [
+                {"title": {"$regex": regex_pattern, "$options": "i"}},
+                {"full_caption": {"$regex": regex_pattern, "$options": "i"}}
+            ]
+        }).sort("views_count", -1).limit(RESULTS_COUNT)
+        results = await db_cursor.to_list(length=RESULTS_COUNT)
 
-    # যদি তবুও না পায় এবং TMDB রেজাল্ট ছিল, তাহলে Fuzzy Logic চালাবে
-    if not results and final_search_term:
+    # --- [STEP 3] --- TMDB / Auto Correct (Priority 2)
+    # যদি লোকাল সার্চে কিছুই না পাওয়া যায়, তখন TMDB বা গুগল কারেকশন দেখবে
+    tmdb_detected_title = None
+    
+    if not results:
+        tmdb_detected_title = await get_tmdb_suggestion(cleaned_query)
+        if tmdb_detected_title:
+            tmdb_clean = clean_text(tmdb_detected_title)
+            db_cursor = movies_col.find({
+                "title_clean": {"$regex": re.escape(tmdb_clean), "$options": "i"}
+            }).sort("views_count", -1).limit(RESULTS_COUNT)
+            results = await db_cursor.to_list(length=RESULTS_COUNT)
+            if results:
+                search_source = f"✅ **Auto Corrected:** '{tmdb_detected_title}'"
+
+    # --- [STEP 4] --- Fuzzy Logic (Priority 3)
+    if not results:
         all_movie_data = await movies_col.find({}, {"title_clean": 1, "original_title": "$title", "message_id": 1, "views_count": 1}).to_list(length=None)
+        
         corrected_suggestions = await asyncio.get_event_loop().run_in_executor(
-            thread_pool_executor, find_corrected_matches, final_search_term, all_movie_data, 75, RESULTS_COUNT
+            thread_pool_executor, find_corrected_matches, cleaned_query, all_movie_data, 70, RESULTS_COUNT
         )
+        
+        # TMDB রেজাল্ট দিয়ে ফাজি ট্রাই
+        if not corrected_suggestions and tmdb_detected_title:
+             corrected_suggestions = await asyncio.get_event_loop().run_in_executor(
+                thread_pool_executor, find_corrected_matches, clean_text(tmdb_detected_title), all_movie_data, 75, RESULTS_COUNT
+            )
+
         if corrected_suggestions:
             results = corrected_suggestions
             search_source = f"🤔 আপনি কি **{corrected_suggestions[0]['title']}** খুঁজছেন?"
 
-    # --- [STEP 4] --- রেজাল্ট পাঠানো অথবা ফেইল হলে এডমিন এলার্ট
+    # --- [STEP 5] --- ফলাফল পাঠানো
     if results:
         await loading_message.delete()
-        await send_results(msg, results, f"{search_source}\n👇 নিচের লিংকে ক্লিক করুন:")
+        header_text = f"🎬 **আপনার মুভি পাওয়া গেছে:**\n{search_source}" if search_source else "🎬 **আপনার মুভি পাওয়া গেছে:**"
+        await send_results(msg, results, f"{header_text}\n👇 নিচের লিংকে ক্লিক করুন:")
         return
 
-    # --- [STEP 5] --- কোনো রেজাল্ট পাওয়া না গেলে (অটো রিকোয়েস্ট অপশন + এডমিন এলার্ট)
+    # --- [STEP 6] --- কোনো রেজাল্ট পাওয়া না গেলে
     await loading_message.delete()
     Google_Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(cleaned_query)
     
-    # বাটনে ইউজারের অরিজিনাল কুয়েরি পাঠানো হবে
     req_btn = InlineKeyboardButton("এই মুভির জন্য অনুরোধ করুন", callback_data=f"request_movie_{user_id}_{urllib.parse.quote_plus(cleaned_query)}")
     google_btn = InlineKeyboardButton("গুগলে সার্চ করুন", url=Google_Search_url)
     
@@ -601,7 +581,7 @@ async def search(_, msg: Message):
     )
     asyncio.create_task(delete_message_later(alert.chat.id, alert.id))
     
-    # এডমিনের কাছে এলার্ট পাঠানো (TMDB নাম বা ক্লিন নাম সহ)
+    # এডমিন এলার্ট
     query_for_admin = tmdb_detected_title if tmdb_detected_title else cleaned_query
     encoded_query = urllib.parse.quote_plus(query_for_admin)
     admin_btns = get_admin_alert_buttons(user_id, encoded_query)
@@ -610,7 +590,7 @@ async def search(_, msg: Message):
         try:
             await app.send_message(
                 admin_id, 
-                f"❗ *No Result Found!*\n🔍 Search: `{query}`\n🧹 Cleaned/TMDB: `{query_for_admin}`\n👤 User: [{msg.from_user.first_name}](tg://user?id={user_id})", 
+                f"❗ *No Result Found!*\n🔍 Search: `{query}`\n🧹 Auto-Fix: `{query_for_admin}`\n👤 User: [{msg.from_user.first_name}](tg://user?id={user_id})", 
                 reply_markup=admin_btns
             )
         except: pass
@@ -888,7 +868,7 @@ async def callback_handler(_, cq: CallbackQuery):
         await cq.answer()
 
 if __name__ == "__main__":
-    print("🚀 Bot Started with Advanced Smart Search & TMDB Logic...")
+    print("🚀 Bot Started with Local Priority Search Logic...")
     app.loop.create_task(init_settings())
     app.loop.create_task(auto_group_messenger())
     app.run()
