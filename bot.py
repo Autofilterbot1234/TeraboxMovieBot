@@ -43,7 +43,7 @@ RESULTS_COUNT = int(os.getenv("RESULTS_COUNT", 10))
 ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(",")))
 DATABASE_URL = os.getenv("DATABASE_URL")
 UPDATE_CHANNEL = os.getenv("UPDATE_CHANNEL", "https://t.me/TGLinkBase")
-TMDB_API_KEY = os.getenv("TMDB_API_KEY") # [NEW] TMDB API Key
+TMDB_API_KEY = os.getenv("TMDB_API_KEY") # TMDB API Key
 START_PIC = os.getenv("START_PIC", "https://i.ibb.co/prnGXMr3/photo-2025-05-16-05-15-45-7504908428624527364.jpg")
 BROADCAST_PIC = os.getenv("BROADCAST_PIC", "https://telegra.ph/file/18659550b694b47000787.jpg")
 
@@ -67,7 +67,6 @@ logger = logging.getLogger(__name__)
 app = Client("movie_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # ------------------- MongoDB (Async Motor) & Schema -------------------
-# Motor Client (Non-blocking - Main Operations)
 motor_client = AsyncIOMotorClient(DATABASE_URL)
 db = motor_client["movie_bot"]
 
@@ -78,7 +77,7 @@ settings_col = db["settings"]
 requests_col = db["requests"]
 feedback_col = db["feedback"]
 
-# Sync Client (শুধুমাত্র ইনডেক্স তৈরির জন্য একবার রান হবে)
+# Sync Client (ইনডেক্স তৈরির জন্য)
 try:
     sync_client = MongoClient(DATABASE_URL)
     sync_db = sync_client["movie_bot"]
@@ -90,7 +89,7 @@ try:
 except Exception as e:
     print(f"⚠️ Index Error: {e}")
 
-# Marshmallow Schema (Data Validation)
+# Marshmallow Schema
 class MovieSchema(Schema):
     message_id = fields.Int(required=True)
     title = fields.Str(required=True)
@@ -104,7 +103,6 @@ class MovieSchema(Schema):
 
 movie_schema = MovieSchema()
 
-# ডিফল্ট সেটিংস চেক (Async)
 async def init_settings():
     await settings_col.update_one(
         {"key": "protect_forwarding"},
@@ -123,26 +121,35 @@ thread_pool_executor = ThreadPoolExecutor(max_workers=5)
 
 # ------------------- হেল্পার ফাংশন (Smart Stop Words & Cleaning) -------------------
 
-# [UPDATED] স্টপ ওয়ার্ডস লিস্ট
+# [UPDATED] নতুন ও শক্তিশালী স্টপ ওয়ার্ডস লিস্ট
 STOP_WORDS = [
     "movie", "movies", "film", "films", "cinema", "show", "series", "season", "episode", 
-    "full", "link", "download", "watch", "online", "free", "all", "part", "url",
+    "full", "link", "links", "download", "watch", "online", "free", "all", "part", "url",
     "hindi", "bengali", "bangla", "english", "tamil", "telugu", "kannada", "malayalam", 
     "korean", "japanese", "chinese", "spanish", "french", "dubbed", "dual", "audio", 
     "sub", "esub", "subbed", "org", "original",
     "hd", "fhd", "4k", "8k", "1080p", "720p", "480p", "360p", "240p", 
     "cam", "hdcam", "rip", "web", "webrip", "hdrip", "bluray", "dvd", "dvdscr", 
     "hevc", "x264", "x265", "10bit", "60fps", "hdr", "amzn", "nf", "hulu", "mp4", "mkv",
+    "drive", "mega", "gd", "gdrive", "direct", "zone", "hub", "flix", "moviez", "movi",
     "dao", "daw", "den", "din", "lagbe", "chai", "koi", "ase", "nai", "plz", "pls", "please",
-    "karo", "koro", "ta", "dorkar", "urgent", "movies", "link"
+    "karo", "koro", "ta", "dorkar", "urgent", "fast", "server", "site"
 ]
 
 def clean_text(text):
     text = text.lower()
+    # সাল (Year) রিমুভ করা
     text = re.sub(r'(?<!\d)(19|20)\d{2}(?!\d)', '', text) 
-    text = re.sub(r'[^a-z0-9\s]', '', text)
+    
+    # [FIXED] স্পেশাল ক্যারেক্টার রিমুভ করে 'Space' দেওয়া হলো, যাতে শব্দগুলো আলাদা থাকে
+    text = re.sub(r'[^a-z0-9\s]', ' ', text)
+    
     words = text.split()
+    
+    # স্টপ ওয়ার্ডস ফিল্টার করা
     filtered_words = [w for w in words if w not in STOP_WORDS]
+    
+    # আবার জোড়া লাগানো (Database Indexing এর জন্য)
     return "".join(filtered_words)
 
 def extract_language(text):
@@ -176,9 +183,7 @@ async def delete_message_later(chat_id, message_id, delay=300):
 # ------------------- External APIs (TMDB & Google) -------------------
 
 async def get_tmdb_suggestion(query):
-    """TMDB API থেকে সঠিক মুভি টাইটেল খুঁজে বের করবে"""
     if not TMDB_API_KEY: return None
-    
     url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={urllib.parse.quote(query)}&page=1"
     try:
         async with aiohttp.ClientSession() as session:
@@ -195,7 +200,6 @@ async def get_tmdb_suggestion(query):
 async def google_spell_check(query):
     search_url = f"https://www.google.com/search?q={urllib.parse.quote(query)}"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
-    
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(search_url, headers=headers) as resp:
@@ -473,7 +477,6 @@ PREMIUM FEATURES.
     await msg.reply_photo(photo=START_PIC, caption=start_caption, reply_markup=btns)
 
 # ------------------- স্মার্ট সার্চ হ্যান্ডলার (Strict Mode + TMDB) -------------------
-# [UPDATE] আপনার রিকোয়েস্ট অনুযায়ী এই অংশটি আপডেট করা হয়েছে
 @app.on_message(filters.text & (filters.group | filters.private))
 async def search(_, msg: Message):
     query = msg.text.strip()
@@ -498,12 +501,11 @@ async def search(_, msg: Message):
     if not query_clean: 
         query_clean = re.sub(r'[^a-zA-Z0-9]', '', query.lower())
 
-    # --- [STEP 1] --- Direct Exact Match (হুবহু মিল)
+    # --- [STEP 1] --- Direct Exact Match
     exact_match_cursor = movies_col.find({"title_clean": query_clean}).limit(RESULTS_COUNT)
     exact_match = await exact_match_cursor.to_list(length=RESULTS_COUNT)
 
     if exact_match:
-        # হুবহু পেলে সাথে সাথে রিটার্ন, অন্য কিছু খুঁজবে না
         await loading_message.delete()
         await send_results(msg, exact_match, f"🎬 রেজাল্ট পাওয়া গেছে:")
         return
@@ -524,7 +526,6 @@ async def search(_, msg: Message):
             return
             
         # TMDB StartsWith (Strict Regex)
-        # শুধুমাত্র সেই মুভিগুলো আনবে যা TMDB এর সঠিক নাম দিয়ে শুরু হয়
         tmdb_regex_cursor = movies_col.find({
             "title_clean": {"$regex": f"^{re.escape(tmdb_clean)}", "$options": "i"}
         }).limit(RESULTS_COUNT)
@@ -551,7 +552,6 @@ async def search(_, msg: Message):
     # --- [STEP 4] --- Fuzzy Match (High Threshold)
     all_movie_data = await movies_col.find({}, {"title_clean": 1, "original_title": "$title", "message_id": 1, "views_count": 1}).to_list(length=None)
     
-    # স্কোর ৮০ করা হয়েছে যাতে আলতু-ফালতু না আসে
     corrected_suggestions = await asyncio.get_event_loop().run_in_executor(
         thread_pool_executor, find_corrected_matches, query_clean, all_movie_data, 80, RESULTS_COUNT
     )
@@ -718,7 +718,7 @@ async def handle_admin_reply(_, cq: CallbackQuery):
 
 @app.on_message(filters.command("popular") & (filters.private | filters.group))
 async def popular_movies(_, msg: Message):
-    cursor = movies_col.find({"views_count": {"$exists": True}}).sort("views_count", -1).limit(RESULTS_COUNT)
+    cursor = movies_col.find({"views_count": {"$exists": True}}).sort("_count", -1).limit(RESULTS_COUNT)
     popular_movies_list = await cursor.to_list(length=RESULTS_COUNT)
 
     if popular_movies_list:
@@ -854,7 +854,7 @@ async def callback_handler(_, cq: CallbackQuery):
         await cq.answer()
 
 if __name__ == "__main__":
-    print("🚀 Bot Started with Strict TMDB Engine...")
+    print("🚀 Bot Started with Finalized Stop Words & Fixes...")
     app.loop.create_task(init_settings())
     app.loop.create_task(auto_group_messenger())
     app.run()
