@@ -3,6 +3,7 @@
 # Developed by: Ctgmovies23
 # Final Fix: Smart Auto-Correction + DB Re-Search Logic
 # Status: 100% Verified & Ready
+# Fixed: Broadcast Memory Issue & Admin ID Parsing
 # ----------------------------------------------------
 #
 
@@ -40,7 +41,10 @@ API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 RESULTS_COUNT = int(os.getenv("RESULTS_COUNT", 10))
-ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(",")))
+
+# [FIX] Admin ID parsing fix (handles spaces and empty strings)
+ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
+
 DATABASE_URL = os.getenv("DATABASE_URL")
 UPDATE_CHANNEL = os.getenv("UPDATE_CHANNEL", "https://t.me/TGLinkBase")
 TMDB_API_KEY = os.getenv("TMDB_API_KEY") # TMDB API Key
@@ -249,54 +253,66 @@ async def auto_group_messenger():
             await asyncio.sleep(1.5) 
         await asyncio.sleep(AUTO_MSG_INTERVAL)
 
+# [FIXED] Broadcast Function - Uses Batch Processing
 async def broadcast_messages(user_ids, message_func, status_msg=None, total_users=0):
     success = 0
     failed = 0
     start_time = time.time()
-    sem = asyncio.Semaphore(20) 
-
+    
+    # Worker Function
     async def send_worker(user_id):
         nonlocal success, failed
-        async with sem:
+        try:
+            await message_func(user_id)
+            success += 1
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
             try:
                 await message_func(user_id)
                 success += 1
-            except FloodWait as e:
-                await asyncio.sleep(e.value)
-                try:
-                    await message_func(user_id)
-                    success += 1
-                except Exception:
-                    failed += 1
-            except (InputUserDeactivated, UserIsBlocked, PeerIdInvalid):
-                await users_col.delete_one({"_id": user_id})
-                failed += 1
             except Exception:
                 failed += 1
+        except (InputUserDeactivated, UserIsBlocked, PeerIdInvalid):
+            await users_col.delete_one({"_id": user_id})
+            failed += 1
+        except Exception:
+            failed += 1
 
+    # Status Updater
     async def update_status_loop():
         while True:
             await asyncio.sleep(5)
             done = success + failed
+            if total_users == 0: continue
+            
+            percentage = (done / total_users) * 100
+            elapsed = time.time() - start_time
+            if elapsed == 0: elapsed = 1
+            
+            progress_bar = f"[{'■' * int(percentage // 10)}{'□' * (10 - int(percentage // 10))}]"
+            text = (
+                f"🚀 **ব্রডকাস্ট চলছে...**\n\n"
+                f"{progress_bar} **{percentage:.1f}%**\n"
+                f"✅ সফল: `{success}` | ❌ ব্যর্থ: `{failed}`\n"
+                f"⏱ সময়: `{get_readable_time(elapsed)}`"
+            )
+            try:
+                if status_msg:
+                    await (status_msg.edit_caption(text) if status_msg.photo else status_msg.edit_text(text))
+            except Exception: pass
+            
             if done >= total_users:
                 break
-            if status_msg:
-                elapsed = time.time() - start_time
-                if elapsed == 0: elapsed = 1
-                percentage = (done / total_users) * 100
-                progress_bar = f"[{'■' * int(percentage // 10)}{'□' * (10 - int(percentage // 10))}]"
-                text = (
-                    f"🚀 **ব্রডকাস্ট চলছে...**\n\n"
-                    f"{progress_bar} **{percentage:.1f}%**\n"
-                    f"✅ সফল: `{success}` | ❌ ব্যর্থ: `{failed}`\n"
-                    f"⏱ সময়: `{get_readable_time(elapsed)}`"
-                )
-                try:
-                    await (status_msg.edit_caption(text) if status_msg.photo else status_msg.edit_text(text))
-                except Exception: pass
 
     updater_task = asyncio.create_task(update_status_loop())
-    await asyncio.gather(*[send_worker(uid) for uid in user_ids])
+
+    # --- BATCH PROCESSING (The Fix) ---
+    BATCH_SIZE = 50 
+    for i in range(0, len(user_ids), BATCH_SIZE):
+        batch = user_ids[i : i + BATCH_SIZE]
+        await asyncio.gather(*[send_worker(uid) for uid in batch])
+    # ----------------------------------
+
     updater_task.cancel()
 
     elapsed = time.time() - start_time
@@ -899,7 +915,7 @@ async def callback_handler(_, cq: CallbackQuery):
 user_last_start_time = {}
 
 if __name__ == "__main__":
-    print("🚀 Bot Started with FIXED Command & Search Logic...")
+    print("🚀 Bot Started with FIXED Broadcast & Search Logic...")
     app.loop.create_task(init_settings())
     app.loop.create_task(auto_group_messenger())
     app.run()
