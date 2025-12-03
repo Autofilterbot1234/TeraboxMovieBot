@@ -1,7 +1,10 @@
 pyrogram
-pymongo
-dnspython
-Flask
+motor
+aiohttp
+beautifulsoup4
 fuzzywuzzy
 python-Levenshtein
+marshmallow
+ujson
+flask
 tgcrypto
