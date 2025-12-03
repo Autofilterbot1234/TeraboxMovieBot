@@ -1,8 +1,8 @@
 #
 # ----------------------------------------------------
 # Developed by: Ctgmovies23
-# Final Fix: Commands Priority + Smart Search Logic
-# Status: 100% Verified & Fixed
+# Final Fix: Commands Priority + Smart Search + User Suggestion UI
+# Status: 100% Verified & Updated
 # ----------------------------------------------------
 #
 
@@ -703,26 +703,58 @@ async def search(_, msg: Message):
         await send_results(msg, results, f"{header_text}\n👇 নিচের লিংকে ক্লিক করুন:")
         return
 
-    # কিছু না পেলে
-    await loading_message.delete()
-    Google_Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(cleaned_query)
-    req_btn = InlineKeyboardButton("এই মুভির জন্য অনুরোধ করুন", callback_data=f"request_movie_{user_id}_{urllib.parse.quote_plus(cleaned_query)}")
-    google_btn = InlineKeyboardButton("গুগলে সার্চ করুন", url=Google_Search_url)
+    # ---------------------------------------------------------
+    # কিছু না পেলে (Not Found + Smart Suggestion Logic)
+    # ---------------------------------------------------------
     
-    alert_text = f"❌ দুঃখিত! **'{tmdb_detected_title if tmdb_detected_title else cleaned_query}'** আমাদের ডাটাবেসে নেই।"
-    alert = await msg.reply_text(alert_text, reply_markup=InlineKeyboardMarkup([[google_btn], [req_btn]]), quote=True)
+    await loading_message.delete()
+    
+    final_query = tmdb_detected_title if tmdb_detected_title else cleaned_query
+    encoded_final_query = urllib.parse.quote_plus(final_query)
+    
+    Google_Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(final_query)
+    
+    # Request বাটনে এখন সঠিক নাম (যদি পাওয়া যায়) ব্যবহার করা হবে
+    req_btn = InlineKeyboardButton(
+        f"✅ রিকোয়েস্ট করুন", 
+        callback_data=f"request_movie_{user_id}_{encoded_final_query}"
+    )
+    google_btn = InlineKeyboardButton("🌐 গুগলে দেখুন", url=Google_Search_url)
+    
+    if tmdb_detected_title:
+        # কেস ১: ইউজার ভুল লিখেছে, বোট সঠিক নাম পেয়েছে, কিন্তু ফাইল ডাটাবেসে নেই
+        alert_text = (
+            f"❌ **'{query}'** পাওয়া যায়নি।\n\n"
+            f"💡 **আপনি কি এটি খুঁজছিলেন?**\n"
+            f"👉 **{tmdb_detected_title}**\n\n"
+            f"দুঃখিত, এটিও আমাদের ডাটাবেসে নেই। নিচের বাটনে রিকোয়েস্ট করুন 👇"
+        )
+    else:
+        # কেস ২: বোট কোনো সঠিক নামই খুঁজে পায়নি
+        alert_text = (
+            f"❌ দুঃখিত! **'{cleaned_query}'** আমাদের ডাটাবেসে নেই।\n\n"
+            f"বানান সঠিক কিনা যাচাই করুন অথবা গুগলে চেক করুন।"
+        )
+
+    alert = await msg.reply_text(
+        alert_text, 
+        reply_markup=InlineKeyboardMarkup([[req_btn], [google_btn]]), 
+        quote=True
+    )
     asyncio.create_task(delete_message_later(alert.chat.id, alert.id))
     
     # Admin Alert
-    query_for_admin = tmdb_detected_title if tmdb_detected_title else cleaned_query
-    encoded_query = urllib.parse.quote_plus(query_for_admin)
-    admin_btns = get_admin_alert_buttons(user_id, encoded_query)
+    admin_btns = get_admin_alert_buttons(user_id, encoded_final_query)
     
     for admin_id in ADMIN_IDS:
         try:
+            status_text = f"🧹 Auto-Fix: `{final_query}`" if tmdb_detected_title else "⚠️ No Fix Found"
             await app.send_message(
                 admin_id, 
-                f"❗ *No Result Found!*\n🔍 Search: `{query}`\n🧹 Auto-Fix: `{query_for_admin}`\n👤 User: [{msg.from_user.first_name}](tg://user?id={user_id})", 
+                f"❗ *No Result Found!*\n"
+                f"🔍 Search: `{query}`\n"
+                f"{status_text}\n"
+                f"👤 User: [{msg.from_user.first_name}](tg://user?id={user_id})", 
                 reply_markup=admin_btns
             )
         except: pass
