@@ -1,7 +1,7 @@
 #
 # ----------------------------------------------------
 # Developed by: Ctgmovies23
-# Final Fix: Super Fast Broadcast (Semaphore + Cursor)
+# Final Fix: Super Fast Broadcast (Non-Blocking + Semaphore)
 # Status: 100% Verified & Optimized
 # ----------------------------------------------------
 #
@@ -253,14 +253,17 @@ async def auto_group_messenger():
             await asyncio.sleep(1.5) 
         await asyncio.sleep(AUTO_MSG_INTERVAL)
 
-# 🔥 [OPTIMIZED] Super Fast Broadcast Function using Semaphore
+# 🔥 [FIXED & OPTIMIZED] Ultra Fast Broadcast Function (Non-Blocking)
 async def broadcast_messages(cursor, message_func, status_msg=None, total_users=0):
     success = 0
     failed = 0
     start_time = time.time()
     
-    # Semaphore ব্যবহার করা হয়েছে যাতে একসাথে ২০টা থ্রেড কাজ করে
+    # Semaphore to limit concurrent tasks (Avoid FloodWait bomb)
     semaphore = asyncio.Semaphore(20)
+    
+    # Active tasks set to manage memory
+    active_tasks = set()
 
     async def send_worker(user_id):
         nonlocal success, failed
@@ -281,12 +284,12 @@ async def broadcast_messages(cursor, message_func, status_msg=None, total_users=
             except Exception:
                 failed += 1
 
-    # Status Update Loop
+    # Status Update Loop (Background)
     async def update_status_loop():
         while True:
             await asyncio.sleep(5)
             done = success + failed
-            if total_users == 0: continue
+            if total_users == 0 or done == 0: continue
             
             percentage = (done / total_users) * 100
             elapsed = time.time() - start_time
@@ -308,25 +311,29 @@ async def broadcast_messages(cursor, message_func, status_msg=None, total_users=
                     await (status_msg.edit_caption(text) if status_msg.photo else status_msg.edit_text(text))
             except Exception: pass
             
-            if done >= total_users:
+            if done >= total_users and not active_tasks:
                 break
 
     updater_task = asyncio.create_task(update_status_loop())
 
-    # --- Cursor Based Stream Processing ---
-    tasks = []
+    # --- Non-Blocking Stream Processing ---
     async for user in cursor:
         user_id = user["_id"]
-        task = asyncio.create_task(send_worker(user_id))
-        tasks.append(task)
         
-        # 1000 টাস্ক জমলে প্রসেস করে মেমোরি খালি করবে
-        if len(tasks) >= 1000:
-            await asyncio.gather(*tasks)
-            tasks = []
+        # Create task and add to set
+        task = asyncio.create_task(send_worker(user_id))
+        active_tasks.add(task)
+        
+        # Remove task from set when done
+        task.add_done_callback(active_tasks.discard)
+        
+        # If too many tasks are active, wait a bit (Backpressure control)
+        if len(active_tasks) > 50:
+            await asyncio.sleep(0.1)
     
-    if tasks:
-        await asyncio.gather(*tasks)
+    # Wait for remaining tasks to finish
+    while active_tasks:
+        await asyncio.sleep(1)
     # -------------------------------------
 
     updater_task.cancel()
@@ -367,7 +374,6 @@ async def auto_broadcast_worker(movie_title, message_id, thumbnail_id=None):
             msg = await app.send_message(user_id, notification_caption, reply_markup=download_button)
         if msg: asyncio.create_task(delete_message_later(msg.chat.id, msg.id, delay=86400))
 
-    # Cursor ব্যবহার করা হচ্ছে
     cursor = users_col.find({"notify": {"$ne": False}}, {"_id": 1})
     await broadcast_messages(cursor, send_func, status_msg, total_users)
 
@@ -497,13 +503,24 @@ PREMIUM FEATURES.
 
 # ------------------- অ্যাডমিন কমান্ড -------------------
 
+# 🔥 [FIXED] Robust Broadcast Command
 @app.on_message(filters.command("broadcast") & filters.user(ADMIN_IDS))
 async def broadcast(_, msg: Message):
     if not msg.reply_to_message and len(msg.command) < 2:
         await msg.reply("ব্যবহার:\n১. কোনো মেসেজে রিপ্লাই দিয়ে `/broadcast` লিখুন।\n২. অথবা `/broadcast আপনার মেসেজ` লিখুন।")
         return
     
-    # ডাটাবেস থেকে কাউন্ট নেওয়া (ফাস্ট)
+    # Pre-calculate content
+    reply_msg = msg.reply_to_message
+    broadcast_text = None
+    
+    if not reply_msg:
+        full_text = msg.text or msg.caption
+        if not full_text:
+             await msg.reply("❌ কোনো টেক্সট পাওয়া যায়নি।")
+             return
+        broadcast_text = full_text.split(None, 1)[1]
+
     total_users = await users_col.count_documents({})
     
     if total_users == 0:
@@ -512,17 +529,14 @@ async def broadcast(_, msg: Message):
         
     status_msg = await msg.reply_photo(photo=BROADCAST_PIC, caption=f"🚀 **ম্যানুয়াল ব্রডকাস্ট শুরু...**\n👥 টার্গেট: `{total_users}`")
     
-    # কার্সর তৈরি
     cursor = users_col.find({}, {"_id": 1})
 
     async def send_func(user_id):
-        if msg.reply_to_message:
-            await msg.reply_to_message.copy(user_id)
+        if reply_msg:
+            await reply_msg.copy(user_id)
         else:
-            broadcast_text = msg.text.split(None, 1)[1]
             await app.send_message(user_id, broadcast_text, disable_web_page_preview=True)
 
-    # ব্যাকগ্রাউন্ডে চালানো
     asyncio.create_task(broadcast_messages(cursor, send_func, status_msg, total_users))
 
 @app.on_message(filters.command("feedback") & filters.private)
