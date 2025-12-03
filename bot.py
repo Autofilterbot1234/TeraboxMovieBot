@@ -2,7 +2,7 @@
 # ----------------------------------------------------
 # Developed by: Ctgmovies23
 # Advanced Update: Motor (Async), BS4, Marshmallow, Ujson
-# Features: TMDB Integration + Smart Stop Words Removal
+# Features: TMDB Integration + Smart Stop Words Removal + Strict Search
 # ----------------------------------------------------
 #
 
@@ -123,37 +123,26 @@ thread_pool_executor = ThreadPoolExecutor(max_workers=5)
 
 # ------------------- হেল্পার ফাংশন (Smart Stop Words & Cleaning) -------------------
 
-# [UPDATED] স্টপ ওয়ার্ডস লিস্ট (অপ্রয়োজনীয় শব্দ বাদ দেওয়ার জন্য)
+# [UPDATED] স্টপ ওয়ার্ডস লিস্ট
 STOP_WORDS = [
-    # Common Terms
     "movie", "movies", "film", "films", "cinema", "show", "series", "season", "episode", 
     "full", "link", "download", "watch", "online", "free", "all", "part", "url",
-    # Languages
     "hindi", "bengali", "bangla", "english", "tamil", "telugu", "kannada", "malayalam", 
     "korean", "japanese", "chinese", "spanish", "french", "dubbed", "dual", "audio", 
     "sub", "esub", "subbed", "org", "original",
-    # Quality
     "hd", "fhd", "4k", "8k", "1080p", "720p", "480p", "360p", "240p", 
     "cam", "hdcam", "rip", "web", "webrip", "hdrip", "bluray", "dvd", "dvdscr", 
     "hevc", "x264", "x265", "10bit", "60fps", "hdr", "amzn", "nf", "hulu", "mp4", "mkv",
-    # Request Words (Banglish/English)
     "dao", "daw", "den", "din", "lagbe", "chai", "koi", "ase", "nai", "plz", "pls", "please",
     "karo", "koro", "ta", "dorkar", "urgent", "movies", "link"
 ]
 
 def clean_text(text):
-    # সব ছোট হাতের করা
     text = text.lower()
-    # সাল (Year) রেখে বাকি স্পেশাল ক্যারেক্টার রিমুভ (যেমন 1999 বা 2024 রিমুভ হবে না)
     text = re.sub(r'(?<!\d)(19|20)\d{2}(?!\d)', '', text) 
-    # অদরকারি চিহ্ন বাদ দেওয়া
     text = re.sub(r'[^a-z0-9\s]', '', text)
-    
     words = text.split()
-    # স্টপ ওয়ার্ড ফিল্টারিং
     filtered_words = [w for w in words if w not in STOP_WORDS]
-    
-    # স্ট্রিং জয়েন করে রিটার্ন করা
     return "".join(filtered_words)
 
 def extract_language(text):
@@ -186,7 +175,6 @@ async def delete_message_later(chat_id, message_id, delay=300):
 
 # ------------------- External APIs (TMDB & Google) -------------------
 
-# [NEW] TMDB API Integration
 async def get_tmdb_suggestion(query):
     """TMDB API থেকে সঠিক মুভি টাইটেল খুঁজে বের করবে"""
     if not TMDB_API_KEY: return None
@@ -198,19 +186,13 @@ async def get_tmdb_suggestion(query):
                 if resp.status == 200:
                     data = await resp.json()
                     if data.get("results"):
-                        # প্রথম রেজাল্টটা নিবে (সবচেয়ে সঠিকটা)
                         first_match = data["results"][0]
-                        # মুভি হলে title, সিরিজ হলে name
                         return first_match.get("title") or first_match.get("name")
     except Exception as e:
         logger.error(f"TMDB Error: {e}")
     return None
 
-# [NEW] Google Spell Checker via BS4 + Aiohttp
 async def google_spell_check(query):
-    """
-    ডাটাবেসে না পেলে গুগলে সার্চ করে 'Did you mean' চেক করবে।
-    """
     search_url = f"https://www.google.com/search?q={urllib.parse.quote(query)}"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
     
@@ -220,7 +202,6 @@ async def google_spell_check(query):
                 if resp.status == 200:
                     html = await resp.text()
                     soup = BeautifulSoup(html, "html.parser")
-                    # Google 'Did you mean' class check
                     correction = soup.find("a", {"class": "gL9Hy"}) or soup.find("a", {"class": "KcIKMc"})
                     if correction:
                         corrected_text = correction.get_text()
@@ -229,14 +210,11 @@ async def google_spell_check(query):
         logger.error(f"BS4 Error: {e}")
     return None
 
-# [OPTIMIZED] ফাজি সার্চ লজিক
-def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=75, limit=5):
+def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=80, limit=5):
     if not all_movie_titles_data:
         return []
     
     choices = [item["title_clean"] for item in all_movie_titles_data]
-    
-    # Token Set Ratio + Levenshtein (Auto optimized)
     matches_raw = process.extract(query_clean, choices, limit=limit, scorer=fuzz.token_set_ratio)
     
     corrected_suggestions = []
@@ -282,12 +260,11 @@ async def auto_group_messenger():
 async def broadcast_messages(user_ids, message_func, status_msg=None, total_users=0):
     success = 0
     failed = 0
-    blocked = 0
     start_time = time.time()
-    sem = asyncio.Semaphore(20) # Concurrency limit
+    sem = asyncio.Semaphore(20) 
 
     async def send_worker(user_id):
-        nonlocal success, failed, blocked
+        nonlocal success, failed
         async with sem:
             try:
                 await message_func(user_id)
@@ -301,7 +278,6 @@ async def broadcast_messages(user_ids, message_func, status_msg=None, total_user
                     failed += 1
             except (InputUserDeactivated, UserIsBlocked, PeerIdInvalid):
                 await users_col.delete_one({"_id": user_id})
-                blocked += 1
                 failed += 1
             except Exception:
                 failed += 1
@@ -338,7 +314,6 @@ async def broadcast_messages(user_ids, message_func, status_msg=None, total_user
         try:
             await (status_msg.edit_caption(final_text) if status_msg.photo else status_msg.edit_text(final_text))
         except: pass
-    return success, failed
 
 async def auto_broadcast_worker(movie_title, message_id, thumbnail_id=None):
     download_button = InlineKeyboardMarkup([
@@ -346,7 +321,6 @@ async def auto_broadcast_worker(movie_title, message_id, thumbnail_id=None):
     ])
     notification_caption = f"🎬 **নতুন মুভি আপলোড হয়েছে!**\n\n**{movie_title}**\n\nএখনই ডাউনলোড করুন!"
     
-    # Motor allows Async Iteration
     all_user_ids = [user["_id"] async for user in users_col.find({"notify": {"$ne": False}}, {"_id": 1})]
     total_users = len(all_user_ids)
     if total_users == 0: return
@@ -372,7 +346,7 @@ async def auto_broadcast_worker(movie_title, message_id, thumbnail_id=None):
 
     await broadcast_messages(all_user_ids, send_func, status_msg, total_users)
 
-# ------------------- চ্যানেল পোস্ট হ্যান্ডলার (Marshmallow Validation) -------------------
+# ------------------- চ্যানেল পোস্ট হ্যান্ডলার -------------------
 @app.on_message(filters.chat(CHANNEL_ID))
 async def save_post(_, msg: Message):
     text = msg.text or msg.caption
@@ -386,7 +360,6 @@ async def save_post(_, msg: Message):
 
     movie_title = text.splitlines()[0]
     
-    # Data Preparation
     raw_data = {
         "message_id": msg.id,
         "title": movie_title, 
@@ -394,27 +367,22 @@ async def save_post(_, msg: Message):
         "date": msg.date,
         "year": extract_year(text),
         "language": extract_language(text),
-        "title_clean": clean_text(text), # Updated clean_text used here
+        "title_clean": clean_text(text), 
         "views_count": 0,
         "thumbnail_id": thumbnail_file_id 
     }
 
     try:
-        # Marshmallow Validation
         validated_data = movie_schema.load(raw_data)
-        
-        # Async Motor Insert/Update
         result = await movies_col.update_one(
             {"message_id": msg.id}, 
             {"$set": validated_data}, 
             upsert=True
         )
-        
         if result.upserted_id is not None:
             setting = await settings_col.find_one({"key": "global_notify"})
             if setting and setting.get("value"):
                 asyncio.create_task(auto_broadcast_worker(movie_title, msg.id, thumbnail_file_id))
-                
     except ValidationError as err:
         logger.error(f"Schema Validation Error: {err.messages}")
 
@@ -439,7 +407,6 @@ async def start(_, msg: Message):
             return
     user_last_start_time[user_id] = current_time
 
-    # Watch Logic (Async)
     if len(msg.command) > 1 and msg.command[1].startswith("watch_"):
         message_id = int(msg.command[1].replace("watch_", ""))
         protect_setting = await settings_col.find_one({"key": "protect_forwarding"})
@@ -467,7 +434,6 @@ async def start(_, msg: Message):
                 asyncio.create_task(delete_message_later(report_message.chat.id, report_message.id))
                 asyncio.create_task(delete_message_later(copied_message.chat.id, copied_message.id))
             
-            # Atomic Update
             await movies_col.update_one({"message_id": message_id}, {"$inc": {"views_count": 1}})
             
         except Exception:
@@ -475,7 +441,6 @@ async def start(_, msg: Message):
             asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
         return 
 
-    # User Join Update (Async)
     await users_col.update_one(
         {"_id": msg.from_user.id},
         {"$set": {"joined": datetime.now(timezone.utc), "notify": True}},
@@ -507,6 +472,128 @@ PREMIUM FEATURES.
 
     await msg.reply_photo(photo=START_PIC, caption=start_caption, reply_markup=btns)
 
+# ------------------- স্মার্ট সার্চ হ্যান্ডলার (Strict Mode + TMDB) -------------------
+# [UPDATE] আপনার রিকোয়েস্ট অনুযায়ী এই অংশটি আপডেট করা হয়েছে
+@app.on_message(filters.text & (filters.group | filters.private))
+async def search(_, msg: Message):
+    query = msg.text.strip()
+    if not query: return
+    
+    if msg.chat.type in ["group", "supergroup"]:
+        await groups_col.update_one({"_id": msg.chat.id}, {"$set": {"title": msg.chat.title, "active": True}}, upsert=True)
+        if len(query) < 3 or msg.reply_to_message or msg.from_user.is_bot: return
+        if not re.search(r'[a-zA-Z0-9]', query): return
+
+    user_id = msg.from_user.id
+    await users_col.update_one(
+        {"_id": user_id},
+        {"$set": {"last_query": query}, "$setOnInsert": {"joined": datetime.now(timezone.utc)}},
+        upsert=True
+    )
+
+    loading_message = await msg.reply("🔎 <b>Searching...</b>", quote=True)
+    
+    # ইনপুট ক্লিন করা
+    query_clean = clean_text(query)
+    if not query_clean: 
+        query_clean = re.sub(r'[^a-zA-Z0-9]', '', query.lower())
+
+    # --- [STEP 1] --- Direct Exact Match (হুবহু মিল)
+    exact_match_cursor = movies_col.find({"title_clean": query_clean}).limit(RESULTS_COUNT)
+    exact_match = await exact_match_cursor.to_list(length=RESULTS_COUNT)
+
+    if exact_match:
+        # হুবহু পেলে সাথে সাথে রিটার্ন, অন্য কিছু খুঁজবে না
+        await loading_message.delete()
+        await send_results(msg, exact_match, f"🎬 রেজাল্ট পাওয়া গেছে:")
+        return
+
+    # --- [STEP 2] --- TMDB ভেরিফিকেশন
+    tmdb_title = await get_tmdb_suggestion(query)
+    
+    if tmdb_title:
+        tmdb_clean = clean_text(tmdb_title)
+        
+        # TMDB Exact Match
+        tmdb_cursor = movies_col.find({"title_clean": tmdb_clean}).limit(RESULTS_COUNT)
+        tmdb_results = await tmdb_cursor.to_list(length=RESULTS_COUNT)
+
+        if tmdb_results:
+            await loading_message.delete()
+            await send_results(msg, tmdb_results, f"✨ **TMDB রেজাল্ট:**\nসঠিক নাম **'{tmdb_title}'** এর জন্য পাওয়া গেছে:")
+            return
+            
+        # TMDB StartsWith (Strict Regex)
+        # শুধুমাত্র সেই মুভিগুলো আনবে যা TMDB এর সঠিক নাম দিয়ে শুরু হয়
+        tmdb_regex_cursor = movies_col.find({
+            "title_clean": {"$regex": f"^{re.escape(tmdb_clean)}", "$options": "i"}
+        }).limit(RESULTS_COUNT)
+        tmdb_regex_results = await tmdb_regex_cursor.to_list(length=RESULTS_COUNT)
+        
+        if tmdb_regex_results:
+            await loading_message.delete()
+            await send_results(msg, tmdb_regex_results, f"✨ **TMDB সাজেস্ট:**\n**'{tmdb_title}'** এর সাথে মিল রেখে পাওয়া গেছে:")
+            return
+
+    # --- [STEP 3] --- Fallback: Google Spell Check
+    google_correction = await google_spell_check(query)
+    if google_correction:
+        google_clean = clean_text(google_correction)
+        
+        bs4_cursor = movies_col.find({"title_clean": google_clean}).limit(RESULTS_COUNT)
+        bs4_results = await bs4_cursor.to_list(length=RESULTS_COUNT)
+        
+        if bs4_results:
+            await loading_message.delete()
+            await send_results(msg, bs4_results, f"🌐 **Google Suggestion:**\n**'{google_correction}'** এর জন্য রেজাল্ট:")
+            return
+
+    # --- [STEP 4] --- Fuzzy Match (High Threshold)
+    all_movie_data = await movies_col.find({}, {"title_clean": 1, "original_title": "$title", "message_id": 1, "views_count": 1}).to_list(length=None)
+    
+    # স্কোর ৮০ করা হয়েছে যাতে আলতু-ফালতু না আসে
+    corrected_suggestions = await asyncio.get_event_loop().run_in_executor(
+        thread_pool_executor, find_corrected_matches, query_clean, all_movie_data, 80, RESULTS_COUNT
+    )
+
+    if corrected_suggestions:
+        await loading_message.delete()
+        best_match = corrected_suggestions[0]['title']
+        await send_results(msg, corrected_suggestions, f"🤔 আপনি কি **{best_match}** খুঁজছেন?")
+        return
+
+    # --- [STEP 5] --- No Result Found
+    await loading_message.delete()
+    Google_Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
+    req_btn = InlineKeyboardButton("এই মুভির জন্য অনুরোধ করুন", callback_data=f"request_movie_{user_id}_{urllib.parse.quote_plus(query)}")
+    google_btn = InlineKeyboardButton("গুগলে সার্চ করুন", url=Google_Search_url)
+    
+    alert = await msg.reply_text( 
+        f"❌ দুঃখিত! **'{query}'** খুঁজে পাওয়া যায়নি।",
+        reply_markup=InlineKeyboardMarkup([[google_btn], [req_btn]]), quote=True
+    )
+    asyncio.create_task(delete_message_later(alert.chat.id, alert.id))
+    
+    encoded_query = urllib.parse.quote_plus(query)
+    admin_btns = get_admin_alert_buttons(user_id, encoded_query)
+    for admin_id in ADMIN_IDS:
+        try:
+            await app.send_message(admin_id, f"❗ *No Result!*\n🔍 Search: `{query}`\n👤 User: [{msg.from_user.first_name}](tg://user?id={user_id})", reply_markup=admin_btns)
+        except: pass
+
+async def send_results(msg, results, header="🎬 আপনার কাঙ্ক্ষিত মুভি পাওয়া গেছে:"):
+    buttons = []
+    for movie in results:
+        title = movie.get('title') or movie.get('original_title')
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{title[:40]} ({movie.get('views_count', 0)} ভিউ)",
+                url=f"https://t.me/{app.me.username}?start=watch_{movie['message_id']}"
+            )
+        ])
+    m = await msg.reply(header, reply_markup=InlineKeyboardMarkup(buttons), quote=True)
+    asyncio.create_task(delete_message_later(m.chat.id, m.id))
+
 # ------------------- অ্যাডমিন কমান্ড (Async) -------------------
 @app.on_message(filters.command("broadcast") & filters.user(ADMIN_IDS))
 async def broadcast(_, msg: Message):
@@ -514,7 +601,6 @@ async def broadcast(_, msg: Message):
         await msg.reply("ব্যবহার:\n১. কোনো মেসেজে রিপ্লাই দিয়ে `/broadcast` লিখুন।\n২. অথবা `/broadcast আপনার মেসেজ` লিখুন।")
         return
     
-    # Async Fetch
     all_user_ids = [user["_id"] async for user in users_col.find({}, {"_id": 1})]
     total_users = len(all_user_ids)
     
@@ -549,7 +635,6 @@ async def feedback(_, msg: Message):
 
 @app.on_message(filters.command("stats") & filters.user(ADMIN_IDS))
 async def stats(_, msg: Message):
-    # Async Count
     total_groups = await groups_col.count_documents({})
     total_users = await users_col.count_documents({})
     total_movies = await movies_col.count_documents({})
@@ -592,7 +677,6 @@ async def delete_specific_movie(_, msg: Message):
         return
     title = msg.text.split(None, 1)[1].strip()
     
-    # Async Search & Delete
     movie = await movies_col.find_one({"title": {"$regex": re.escape(title), "$options": "i"}})
     if not movie:
         movie = await movies_col.find_one({"title_clean": {"$regex": clean_text(title), "$options": "i"}})
@@ -611,7 +695,6 @@ async def delete_all_movies_command(_, msg: Message):
     ])
     await msg.reply("সব মুভি ডিলিট করতে চান? এটি অপরিবর্তনীয়!", reply_markup=btn)
 
-# ------------------- অ্যাডমিন রিপ্লাই হ্যান্ডলার -------------------
 @app.on_callback_query(filters.regex(r"^noresult_(wrong|notyet|uploaded|coming|unreleased|processing)_(\d+)_([^ ]+)$") & filters.user(ADMIN_IDS))
 async def handle_admin_reply(_, cq: CallbackQuery):
     parts = cq.data.split("_", 3)
@@ -635,7 +718,6 @@ async def handle_admin_reply(_, cq: CallbackQuery):
 
 @app.on_message(filters.command("popular") & (filters.private | filters.group))
 async def popular_movies(_, msg: Message):
-    # Async Sort & Limit
     cursor = movies_col.find({"views_count": {"$exists": True}}).sort("views_count", -1).limit(RESULTS_COUNT)
     popular_movies_list = await cursor.to_list(length=RESULTS_COUNT)
 
@@ -684,126 +766,6 @@ async def request_movie(_, msg: Message):
             await app.send_message(admin_id, f"❗ *নতুন অনুরোধ!*\n🎬 `{movie_name}`\n👤 [{username}](tg://user?id={user_id})", reply_markup=admin_btns)
         except: pass
 
-# ------------------- স্মার্ট সার্চ হ্যান্ডলার (TMDB + Stop Words + DB) -------------------
-@app.on_message(filters.text & (filters.group | filters.private))
-async def search(_, msg: Message):
-    query = msg.text.strip()
-    if not query: return
-    
-    if msg.chat.type in ["group", "supergroup"]:
-        await groups_col.update_one({"_id": msg.chat.id}, {"$set": {"title": msg.chat.title, "active": True}}, upsert=True)
-        if len(query) < 3 or msg.reply_to_message or msg.from_user.is_bot: return
-        if not re.search(r'[a-zA-Z0-9]', query): return
-
-    user_id = msg.from_user.id
-    await users_col.update_one(
-        {"_id": user_id},
-        {"$set": {"last_query": query}, "$setOnInsert": {"joined": datetime.now(timezone.utc)}},
-        upsert=True
-    )
-
-    loading_message = await msg.reply("🔎 <b>Searching...</b>", quote=True)
-    
-    # ১. ইউজার ইনপুট ক্লিন করা (Stop words removed)
-    query_clean = clean_text(query)
-    # যদি সব শব্দ বাদ পড়ে যায় (শুধু 'Movie' লিখলে), তাহলে অরিজিনাল ক্লিন টেক্সট নিবে
-    if not query_clean: 
-        query_clean = re.sub(r'[^a-zA-Z0-9]', '', query.lower())
-
-    # --- [STEP 1] --- লোকাল ডাটাবেস চেক (Exact & Regex)
-    exact_match_cursor = movies_col.find({"title_clean": query_clean}).limit(RESULTS_COUNT)
-    exact_match = await exact_match_cursor.to_list(length=RESULTS_COUNT)
-    
-    regex_match_cursor = movies_col.find({
-        "title_clean": {"$regex": re.escape(query_clean), "$options": "i"}
-    }).limit(RESULTS_COUNT)
-    regex_match = await regex_match_cursor.to_list(length=RESULTS_COUNT)
-
-    final_results = exact_match + [m for m in regex_match if m["message_id"] not in [e["message_id"] for e in exact_match]]
-    
-    if final_results:
-        await loading_message.delete()
-        await send_results(msg, final_results[:RESULTS_COUNT])
-        return
-
-    # --- [STEP 2] --- Fuzzy Search (যদি সরাসরি না পাওয়া যায়)
-    all_movie_data = await movies_col.find({}, {"title_clean": 1, "original_title": "$title", "message_id": 1, "views_count": 1}).to_list(length=None)
-    
-    corrected_suggestions = await asyncio.get_event_loop().run_in_executor(
-        thread_pool_executor, find_corrected_matches, query_clean, all_movie_data, 70, RESULTS_COUNT
-    )
-
-    if corrected_suggestions:
-        await loading_message.delete()
-        best_match = corrected_suggestions[0]['title']
-        await send_results(msg, corrected_suggestions, f"🤔 আপনি কি **{best_match}** খুঁজছেন?")
-        return
-
-    # --- [STEP 3] --- TMDB API Correction (NEW FEATURE) 🔥
-    # ডাটাবেসে বা ফাজিতেও না পেলে, এবার TMDB কে জিজ্ঞেস করবে
-    tmdb_correction = await get_tmdb_suggestion(query)
-    
-    if tmdb_correction:
-        tmdb_clean = clean_text(tmdb_correction)
-        
-        # যদি TMDB এর দেওয়া নাম আর ইউজারের সার্চ করা নাম আলাদা হয় (মানে বানান ভুল ছিল)
-        if tmdb_clean != query_clean:
-            # সঠিক নাম দিয়ে আবার ডাটাবেস চেক
-            tmdb_cursor = movies_col.find({"title_clean": {"$regex": tmdb_clean, "$options": "i"}}).limit(RESULTS_COUNT)
-            tmdb_results = await tmdb_cursor.to_list(length=RESULTS_COUNT)
-            
-            if tmdb_results:
-                await loading_message.delete()
-                await send_results(msg, tmdb_results, f"✨ **TMDB Corrected:**\nআপনি **'{query}'** খুঁজেছেন, কিন্তু সঠিক নাম **'{tmdb_correction}'**। রেজাল্ট:")
-                return
-
-    # --- [STEP 4] --- Google Fallback (Last Resort)
-    # TMDB তেও না পেলে গুগলে চেক করবে (BS4)
-    google_correction = await google_spell_check(query)
-    if google_correction:
-        google_clean = clean_text(google_correction)
-        if google_clean != query_clean and google_clean != clean_text(tmdb_correction or ""):
-            bs4_cursor = movies_col.find({"title_clean": {"$regex": google_clean, "$options": "i"}}).limit(RESULTS_COUNT)
-            bs4_results = await bs4_cursor.to_list(length=RESULTS_COUNT)
-            
-            if bs4_results:
-                await loading_message.delete()
-                await send_results(msg, bs4_results, f"🌐 **Google Suggestion:**\nআমরা **'{google_correction}'** এর জন্য রেজাল্ট পেয়েছি:")
-                return
-
-    # --- [STEP 5] --- No Result Found
-    await loading_message.delete()
-    Google_Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
-    req_btn = InlineKeyboardButton("এই মুভির জন্য অনুরোধ করুন", callback_data=f"request_movie_{user_id}_{urllib.parse.quote_plus(query)}")
-    google_btn = InlineKeyboardButton("গুগলে সার্চ করুন", url=Google_Search_url)
-    
-    alert = await msg.reply_text( 
-        f"❌ দুঃখিত! **'{query}'** খুঁজে পাওয়া যায়নি।\n\nগুগল বাটন চেক করুন অথবা রিকোয়েস্ট করুন।",
-        reply_markup=InlineKeyboardMarkup([[google_btn], [req_btn]]), quote=True
-    )
-    asyncio.create_task(delete_message_later(alert.chat.id, alert.id))
-    
-    # Admin Alert
-    encoded_query = urllib.parse.quote_plus(query)
-    admin_btns = get_admin_alert_buttons(user_id, encoded_query)
-    for admin_id in ADMIN_IDS:
-        try:
-            await app.send_message(admin_id, f"❗ *No Result!*\n🔍 Search: `{query}`\n👤 User: [{msg.from_user.first_name}](tg://user?id={user_id})", reply_markup=admin_btns)
-        except: pass
-
-async def send_results(msg, results, header="🎬 আপনার কাঙ্ক্ষিত মুভি পাওয়া গেছে:"):
-    buttons = []
-    for movie in results:
-        title = movie.get('title') or movie.get('original_title')
-        buttons.append([
-            InlineKeyboardButton(
-                text=f"{title[:40]} ({movie.get('views_count', 0)} ভিউ)",
-                url=f"https://t.me/{app.me.username}?start=watch_{movie['message_id']}"
-            )
-        ])
-    m = await msg.reply(header, reply_markup=InlineKeyboardMarkup(buttons), quote=True)
-    asyncio.create_task(delete_message_later(m.chat.id, m.id))
-
 def get_admin_alert_buttons(user_id, encoded_query):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("❌ ভুল নাম", callback_data=f"noresult_wrong_{user_id}_{encoded_query}"),
@@ -814,7 +776,6 @@ def get_admin_alert_buttons(user_id, encoded_query):
          InlineKeyboardButton("⏳ এখনো আসেনি", callback_data=f"noresult_notyet_{user_id}_{encoded_query}")]
     ])
 
-# ------------------- কলব্যাক হ্যান্ডলার -------------------
 @app.on_callback_query()
 async def callback_handler(_, cq: CallbackQuery):
     data = cq.data
@@ -884,7 +845,6 @@ async def callback_handler(_, cq: CallbackQuery):
         await cq.answer("অনুরোধ জমা হয়েছে ✅", show_alert=True)
         await cq.message.edit_text(f"✅ **'{name}'** এর জন্য অনুরোধ জমা নেওয়া হয়েছে।")
         
-        # Admin Notification for Inline Request
         btns = InlineKeyboardMarkup([[InlineKeyboardButton("Done", callback_data="noop")]])
         for aid in ADMIN_IDS:
             try: await app.send_message(aid, f"❗ *Inline Req*\n🎬 `{name}`\n👤 {cq.from_user.mention}", reply_markup=btns)
@@ -894,7 +854,7 @@ async def callback_handler(_, cq: CallbackQuery):
         await cq.answer()
 
 if __name__ == "__main__":
-    print("🚀 Bot Started with TMDB Engine...")
+    print("🚀 Bot Started with Strict TMDB Engine...")
     app.loop.create_task(init_settings())
     app.loop.create_task(auto_group_messenger())
     app.run()
