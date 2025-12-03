@@ -126,20 +126,21 @@ async def delete_message_later(chat_id, message_id, delay=300):
     except Exception:
         pass
 
-# [OPTIMIZED] ফাজি সার্চ লজিক
-def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=55, limit=5):
+# [OPTIMIZED] ফাজি সার্চ লজিক (আপডেট করা হয়েছে: এখন token_set_ratio ব্যবহার করবে)
+def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=75, limit=5):
     if not all_movie_titles_data:
         return []
     
     choices = [item["title_clean"] for item in all_movie_titles_data]
     
-    # WRatio ব্যবহার করা হচ্ছে যা টাইপো এবং আংশিক মিল ভালোভাবে ধরে
-    matches_raw = process.extract(query_clean, choices, limit=limit, scorer=fuzz.WRatio)
+    # WRatio এর বদলে token_set_ratio ব্যবহার করা হলো যা মুভির নামের জন্য বেশি সঠিক রেজাল্ট দেয়
+    matches_raw = process.extract(query_clean, choices, limit=limit, scorer=fuzz.token_set_ratio)
     
     corrected_suggestions = []
     seen_titles = set()
     
     for matched_clean_title, score in matches_raw:
+        # এখানে score_cutoff চেক করা হচ্ছে (এখন ডিফল্ট ৭৫)
         if score >= score_cutoff:
             for movie_data in all_movie_titles_data:
                 if movie_data["title_clean"] == matched_clean_title:
@@ -673,19 +674,20 @@ async def search(_, msg: Message):
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
         return
 
-    # ২. যদি কোনো রেজাল্ট না পাওয়া যায়, তখন Fuzzy Logic / Did You Mean চেক করবে
+    # ২. যদি কোনো রেজাল্ট না পাওয়া যায়, তখন Fuzzy Logic চেক করবে
     all_movie_data_cursor = movies_col.find(
         {}, 
         {"title_clean": 1, "original_title": "$title", "message_id": 1, "language": 1, "views_count": 1}
     )
     all_movie_data = list(all_movie_data_cursor)
     
+    # [FIXED] এখানে স্কোর কাটঅফ ৫০ থেকে বাড়িয়ে ৭৫ করা হয়েছে
     corrected_suggestions = await asyncio.get_event_loop().run_in_executor(
         thread_pool_executor,
         find_corrected_matches,
         query_clean,
         all_movie_data,
-        50, # স্কোর কাটঅফ ৫০
+        75, # <--- পরিবর্তন: ৭৫% বা তার বেশি মিল থাকতে হবে, না হলে সাজেশন দেখাবে না
         RESULTS_COUNT
     )
     await loading_message.delete()
@@ -711,7 +713,7 @@ async def search(_, msg: Message):
         m = await msg.reply(did_you_mean_text, reply_markup=InlineKeyboardMarkup(buttons), quote=True)
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
 
-        # [NEW UPDATE] এডমিনকে নোটিফিকেশন পাঠানো যখন সাজেশন দেওয়া হয় (এখন ৬টি বাটন সহ)
+        # এডমিনকে নোটিফিকেশন পাঠানো যখন সাজেশন দেওয়া হয়
         encoded_query = urllib.parse.quote_plus(query)
         admin_fuzzy_btns = InlineKeyboardMarkup([
             [
@@ -744,7 +746,7 @@ async def search(_, msg: Message):
                 pass
         
     else:
-        # ৩. কিছুই না পাওয়া গেলে
+        # ৩. কিছুই না পাওয়া গেলে (অথবা ৭৫% এর নিচে মিল থাকলে)
         Google_Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
         request_button = InlineKeyboardButton("এই মুভির জন্য অনুরোধ করুন", callback_data=f"request_movie_{user_id}_{urllib.parse.quote_plus(query)}")
         google_button_row = [InlineKeyboardButton("গুগলে সার্চ করুন", url=Google_Search_url)]
