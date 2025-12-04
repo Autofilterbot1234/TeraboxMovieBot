@@ -503,7 +503,7 @@ PREMIUM FEATURES.
 
 # ------------------- অ্যাডমিন কমান্ড -------------------
 
-# 🔥 [FIXED] Robust Broadcast Command
+# 🔥 [FIXED] Robust Broadcast Command (Manual Broadcast Fix)
 @app.on_message(filters.command("broadcast") & filters.user(ADMIN_IDS))
 async def broadcast(_, msg: Message):
     if not msg.reply_to_message and len(msg.command) < 2:
@@ -513,8 +513,13 @@ async def broadcast(_, msg: Message):
     # Pre-calculate content
     reply_msg = msg.reply_to_message
     broadcast_text = None
+    origin_chat_id = None
+    origin_message_id = None
     
-    if not reply_msg:
+    if reply_msg:
+        origin_chat_id = reply_msg.chat.id
+        origin_message_id = reply_msg.id
+    else:
         full_text = msg.text or msg.caption
         if not full_text:
              await msg.reply("❌ কোনো টেক্সট পাওয়া যায়নি।")
@@ -533,7 +538,8 @@ async def broadcast(_, msg: Message):
 
     async def send_func(user_id):
         if reply_msg:
-            await reply_msg.copy(user_id)
+            # FIX: Using copy_message with specific IDs instead of object.copy()
+            await app.copy_message(user_id, origin_chat_id, origin_message_id)
         else:
             await app.send_message(user_id, broadcast_text, disable_web_page_preview=True)
 
