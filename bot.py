@@ -2,7 +2,7 @@
 # ----------------------------------------------------
 # Developed by: Ctgmovies23
 # Final Version: Advanced Auto Filter + Super Fast Broadcast + Web Verification (Ads)
-# Status: 100% Verified & Optimized
+# Status: 100% Verified & Optimized (Syntax Fixed)
 # ----------------------------------------------------
 #
 
@@ -36,10 +36,10 @@ from fuzzywuzzy import process, fuzz # Fuzzy Logic
 from marshmallow import Schema, fields, ValidationError # Schema Validation
 
 # ------------------- কনফিগারেশন -------------------
-API_ID = int(os.getenv("API_ID"))
+API_ID = int(os.getenv("API_ID", "0")) # Default 0 to prevent int() error if missing
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
+CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
 RESULTS_COUNT = int(os.getenv("RESULTS_COUNT", 10))
 
 # Admin ID parsing
@@ -51,22 +51,15 @@ TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 START_PIC = os.getenv("START_PIC", "https://i.ibb.co/prnGXMr3/photo-2025-05-16-05-15-45-7504908428624527364.jpg")
 BROADCAST_PIC = os.getenv("BROADCAST_PIC", "https://telegra.ph/file/18659550b694b47000787.jpg")
 
-# --- WEB & ADS CONFIGURATION ---
-BASE_URL = os.getenv("BASE_URL", "http://loud-eilis-teraboxmoviebot-1598d946.koyeb.app") # আপনার ডোমেইন লিংক দিন (শেষে / ছাড়া)
-AD_CODE_HEAD = os.getenv("AD_CODE_HEAD", "<script type="text/javascript">
-  atOptions = {
-  	'key' : '08d001ab7969abf2253178c1bffe57f7',
-  	'format' : 'iframe',
-  	'height' : 90,
-  	'width' : 728,
-  	'params' : {}
-  };
-</script>
-<script
-  type="text/javascript"
-  src="//www.highperformanceformat.com/08d001ab7969abf2253178c1bffe57f7/invoke.js"
-></script>") # Adsterra Head/Popunder Script
-AD_CODE_BODY = os.getenv("AD_CODE_BODY", "<h3>Advertisement Area</h3>") # Adsterra Banner Script
+# --- WEB & ADS CONFIGURATION (FIXED SECTION) ---
+# এখানে ডিফল্ট ভ্যালু ফাঁকা রাখা হয়েছে যাতে Syntax Error না হয়।
+# আপনি Koyeb এর Settings -> Environment Variables এ গিয়ে AD_CODE_HEAD এবং AD_CODE_BODY সেট করবেন।
+
+BASE_URL = os.getenv("BASE_URL", "http://localhost:8080") 
+
+# Triple quotes (""") ব্যবহার করা হয়েছে যাতে HTML কোড বসালেও এরর না দেয়
+AD_CODE_HEAD = os.getenv("AD_CODE_HEAD", "") 
+AD_CODE_BODY = os.getenv("AD_CODE_BODY", """<h3>Advertisement Area</h3>""") 
 
 # অটো মেসেজ সেটিংস
 AUTO_MSG_INTERVAL = 1200  
@@ -85,22 +78,24 @@ AUTO_MESSAGE_TEXT = """
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Client Setup
 app = Client("movie_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # ------------------- MongoDB Setup -------------------
-motor_client = AsyncIOMotorClient(DATABASE_URL)
-db = motor_client["movie_bot"]
-
-movies_col = db["movies"]
-users_col = db["users"]
-groups_col = db["groups"]
-settings_col = db["settings"]
-requests_col = db["requests"]
-feedback_col = db["feedback"]
-verify_col = db["verification"] # টোকেন সেভ করার জন্য নতুন কালেকশন
-
-# Sync Client (ইনডেক্স তৈরির জন্য)
+# MongoDB কানেকশন এরর হ্যান্ডলিং
 try:
+    motor_client = AsyncIOMotorClient(DATABASE_URL)
+    db = motor_client["movie_bot"]
+
+    movies_col = db["movies"]
+    users_col = db["users"]
+    groups_col = db["groups"]
+    settings_col = db["settings"]
+    requests_col = db["requests"]
+    feedback_col = db["feedback"]
+    verify_col = db["verification"] 
+
+    # Sync Client (ইনডেক্স তৈরির জন্য)
     sync_client = MongoClient(DATABASE_URL)
     sync_db = sync_client["movie_bot"]
     sync_db.movies.create_index("message_id", unique=True, background=True)
@@ -112,7 +107,7 @@ try:
     sync_db.verification.create_index("created_at", expireAfterSeconds=3600)
     print("✅ Database Indexes & TTL Created Successfully!")
 except Exception as e:
-    print(f"⚠️ Index Error: {e}")
+    print(f"⚠️ Database Connection Error: {e}")
 
 # Schema
 class MovieSchema(Schema):
@@ -129,11 +124,14 @@ class MovieSchema(Schema):
 movie_schema = MovieSchema()
 
 async def init_settings():
-    await settings_col.update_one(
-        {"key": "protect_forwarding"},
-        {"$setOnInsert": {"value": True}},
-        upsert=True
-    )
+    try:
+        await settings_col.update_one(
+            {"key": "protect_forwarding"},
+            {"$setOnInsert": {"value": True}},
+            upsert=True
+        )
+    except Exception as e:
+        logger.error(f"Settings Init Error: {e}")
 
 # ------------------- Flask অ্যাপ (Website & Ads) -------------------
 flask_app = Flask(__name__)
@@ -217,19 +215,7 @@ def get_verification_html(heading, timer_seconds, next_link, btn_text):
             
             <!-- Adsterra Body Banner -->
             <div class="ad-area">
-                <script type="text/javascript">
-  atOptions = {
-  	'key' : '08d001ab7969abf2253178c1bffe57f7',
-  	'format' : 'iframe',
-  	'height' : 90,
-  	'width' : 728,
-  	'params' : {}
-  };
-</script>
-<script
-  type="text/javascript"
-  src="//www.highperformanceformat.com/08d001ab7969abf2253178c1bffe57f7/invoke.js"
-></script>
+                {AD_CODE_BODY}
             </div>
 
             <div class="timer-box">
@@ -288,7 +274,7 @@ def verify_page_two(token):
         return "❌ Session Expired. Search again."
 
     # পেজ ২: ১০ সেকেন্ড অপেক্ষা -> টেলিগ্রামে ফিরবে
-    bot_username = app.me.username if app.me else "TGLinkBaseBot" # প্রয়োজনে ম্যানুয়ালি নাম দিন
+    bot_username = app.me.username if app.me else "TGLinkBaseBot" 
     final_link = f"https://t.me/{bot_username}?start=verified_{token}"
 
     return get_verification_html(
@@ -298,7 +284,11 @@ def verify_page_two(token):
         btn_text="GET FILE NOW ✅"
     )
 
-Thread(target=lambda: flask_app.run(host="0.0.0.0", port=8080)).start() 
+# Flask Server in Thread
+def run_flask():
+    flask_app.run(host="0.0.0.0", port=8080)
+
+Thread(target=run_flask).start() 
 thread_pool_executor = ThreadPoolExecutor(max_workers=5)
 
 # ------------------- হেল্পার ফাংশন -------------------
@@ -429,19 +419,23 @@ def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=80, 
 async def auto_group_messenger():
     print("✅ অটো গ্রুপ মেসেজ সিস্টেম চালু হয়েছে...")
     while True:
-        async for group in groups_col.find({}):
-            chat_id = group["_id"]
-            try:
-                sent = await app.send_message(chat_id, AUTO_MESSAGE_TEXT)
-                if sent:
-                    asyncio.create_task(delete_message_later(chat_id, sent.id, delay=AUTO_MSG_DELETE_TIME))
-            except FloodWait as e:
-                await asyncio.sleep(e.value)
-            except (PeerIdInvalid, UserIsBlocked):
-                await groups_col.delete_one({"_id": chat_id})
-            except Exception:
-                pass
-            await asyncio.sleep(1.5) 
+        try:
+            async for group in groups_col.find({}):
+                chat_id = group["_id"]
+                try:
+                    sent = await app.send_message(chat_id, AUTO_MESSAGE_TEXT)
+                    if sent:
+                        asyncio.create_task(delete_message_later(chat_id, sent.id, delay=AUTO_MSG_DELETE_TIME))
+                except FloodWait as e:
+                    await asyncio.sleep(e.value)
+                except (PeerIdInvalid, UserIsBlocked):
+                    await groups_col.delete_one({"_id": chat_id})
+                except Exception:
+                    pass
+                await asyncio.sleep(1.5) 
+        except Exception as e:
+            logger.error(f"Auto Msg Error: {e}")
+        
         await asyncio.sleep(AUTO_MSG_INTERVAL)
 
 async def broadcast_messages(cursor, message_func, status_msg=None, total_users=0):
@@ -527,9 +521,6 @@ async def broadcast_messages(cursor, message_func, status_msg=None, total_users=
         except: pass
 
 async def auto_broadcast_worker(movie_title, message_id, thumbnail_id=None):
-    # অটো ব্রডকাস্টের ক্ষেত্রেও ভেরিফিকেশন লিংক দেওয়া হবে না (ডাইরেক্ট বাটন),
-    # তবে ইউজার চাইলে এখানেও create_verification_link() অ্যাড করতে পারেন।
-    # আপাতত সিম্পল রাখার জন্য ডাইরেক্ট ওয়াচ লিংক রাখছি।
     download_button = InlineKeyboardMarkup([
         [InlineKeyboardButton("ডাউনলোড লিংক", url=f"https://t.me/{app.me.username}?start=watch_{message_id}")]
     ])
@@ -673,7 +664,6 @@ async def start(_, msg: Message):
             
         # --- OLD DIRECT LINK HANDLER (Fallback) ---
         elif argument.startswith("watch_"):
-            # চাইলে এটি রিমুভ করে দিতে পারেন যদি শুধু ভেরিফিকেশন লিংক রাখতে চান
             message_id = int(argument.replace("watch_", ""))
             try:
                 await app.copy_message(msg.chat.id, CHANNEL_ID, message_id)
@@ -953,7 +943,6 @@ async def send_results(msg, results, header="🎬 আপনার কাঙ্�
 
 @app.on_callback_query(filters.regex(r"^noresult_"))
 async def handle_admin_reply(_, cq: CallbackQuery):
-    # Admin logic remains same
     await cq.answer("Command Received")
 
 @app.on_callback_query()
