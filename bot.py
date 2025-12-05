@@ -1,7 +1,7 @@
 #
 # ----------------------------------------------------
 # Developed by: Ctgmovies23
-# Final Version: Auto Filter + Web Verify + 6 Button Request + Auto Admin Notify
+# Final Version: Auto Filter + Web Verify + 3 Ad Slots + Auto Admin Notify
 # Status: 100% Verified & Fixed
 # ----------------------------------------------------
 #
@@ -51,16 +51,18 @@ TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 START_PIC = os.getenv("START_PIC", "https://i.ibb.co/prnGXMr3/photo-2025-05-16-05-15-45-7504908428624527364.jpg")
 BROADCAST_PIC = os.getenv("BROADCAST_PIC", "https://telegra.ph/file/18659550b694b47000787.jpg")
 
-# --- WEB & ADS CONFIGURATION ---
+# --- WEB & ADS CONFIGURATION (NEW UPDATED) ---
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8080") 
 
-# Koyeb থেকে AD_CODE_HEAD এবং AD_CODE_BODY সেট করবেন
-AD_CODE_HEAD = os.getenv("AD_CODE_HEAD", "") 
+# Koyeb Environment Variables থেকে অ্যাড কোডগুলো লোড হবে
+AD_CODE_HEAD = os.getenv("AD_CODE_HEAD", "") # পপঅান্ডার বা সোশ্যাল বার
+AD_CODE_TOP = os.getenv("AD_CODE_TOP", "")   # একদম উপরে (লোগোর উপরে)
 AD_CODE_BODY = os.getenv("AD_CODE_BODY", """
-<div style="text-align: center; color: #ffaa00; margin: 10px;">
-    <h3>⬇️ Download Link Generating... ⬇️</h3>
+<div style="text-align: center; color: #ffaa00; margin: 10px; border: 1px dashed #444; padding: 10px;">
+    <h4>⬇️ Ads Area (Middle) ⬇️</h4>
 </div>
-""") 
+""") # মাঝখানে (টাইমারের আগে)
+AD_CODE_BOTTOM = os.getenv("AD_CODE_BOTTOM", "") # একদম নিচে (বাটনের পরে)
 
 # অটো মেসেজ সেটিংস
 AUTO_MSG_INTERVAL = 1200  
@@ -136,7 +138,7 @@ async def init_settings():
     except Exception as e:
         logger.error(f"Settings Init Error: {e}")
 
-# ------------------- Flask অ্যাপ (Website & Ads) -------------------
+# ------------------- Flask অ্যাপ (Website & Ads Updated) -------------------
 flask_app = Flask(__name__)
 
 def get_verification_html(heading, timer_seconds, next_link, btn_text):
@@ -155,37 +157,54 @@ def get_verification_html(heading, timer_seconds, next_link, btn_text):
                 display: flex;
                 flex-direction: column;
                 align-items: center;
-                justify-content: center;
                 min-height: 100vh;
                 margin: 0;
                 text-align: center;
-                padding: 20px;
+                padding: 10px;
             }}
             .container {{
                 background: #1e1e1e;
-                padding: 30px;
+                padding: 20px;
                 border-radius: 12px;
                 box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
                 max-width: 100%;
-                width: 400px;
+                width: 420px;
                 border: 1px solid #333;
+                margin-bottom: 20px;
             }}
-            h2 {{ color: #00ff88; margin-bottom: 15px; font-size: 22px; }}
-            p {{ font-size: 16px; margin-bottom: 20px; }}
+            h2 {{ color: #00ff88; margin-bottom: 10px; font-size: 20px; }}
+            p {{ font-size: 15px; margin-bottom: 15px; }}
+            
+            /* Ad Slots Styling */
+            .ad-box {{
+                width: 100%;
+                margin: 15px 0;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                overflow: hidden;
+            }}
+            .ad-box img, .ad-box iframe {{
+                max-width: 100%;
+                height: auto;
+                border-radius: 4px;
+            }}
+
             .timer-box {{
-                font-size: 20px;
+                font-size: 18px;
                 font-weight: bold;
                 color: #ffaa00;
-                margin: 15px 0;
+                margin: 10px 0;
                 padding: 12px;
                 background: #2a2a2a;
                 border-radius: 8px;
+                border: 1px dashed #555;
             }}
             .btn {{
                 display: none;
                 background: linear-gradient(135deg, #007bff, #0056b3);
                 color: white;
-                padding: 14px 28px;
+                padding: 14px 25px;
                 text-decoration: none;
                 font-size: 18px;
                 border-radius: 8px;
@@ -193,31 +212,27 @@ def get_verification_html(heading, timer_seconds, next_link, btn_text):
                 transition: transform 0.2s;
                 width: 100%;
                 box-sizing: border-box;
-                margin-top: 15px;
+                margin-top: 10px;
             }}
             .btn:hover {{ transform: scale(1.02); }}
-            .ad-area {{
-                margin: 20px 0;
-                background: #252525;
-                min-height: 250px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                border-radius: 8px;
-                overflow: hidden;
-            }}
-            footer {{ margin-top: 20px; font-size: 12px; color: #777; }}
+            footer {{ margin-top: 15px; font-size: 12px; color: #777; }}
         </style>
         <!-- Adsterra Head Code -->
         {AD_CODE_HEAD}
     </head>
     <body>
+        
+        <!-- 1. TOP AD (বক্সের উপরে) -->
+        <div class="ad-box">
+            {AD_CODE_TOP}
+        </div>
+
         <div class="container">
-            <h2>🛡️ Link Verification System</h2>
+            <h2>🛡️ Link Verification</h2>
             <p>{heading}</p>
             
-            <!-- Adsterra Body Banner -->
-            <div class="ad-area">
+            <!-- 2. MIDDLE AD (টাইমারের আগে) -->
+            <div class="ad-box">
                 {AD_CODE_BODY}
             </div>
 
@@ -227,6 +242,11 @@ def get_verification_html(heading, timer_seconds, next_link, btn_text):
             
             <a id="actionBtn" href="{next_link}" class="btn">{btn_text}</a>
             
+            <!-- 3. BOTTOM AD (বাটনের পরে) -->
+            <div class="ad-box">
+                {AD_CODE_BOTTOM}
+            </div>
+
             <footer>
                 Secured by MovieBot &bull; Fast & Safe
             </footer>
@@ -1114,7 +1134,7 @@ async def callback_handler(_, cq: CallbackQuery):
 user_last_start_time = {}
 
 if __name__ == "__main__":
-    print("🚀 Bot Started with Toggle Verification & Auto Admin Notification System...")
+    print("🚀 Bot Started with Toggle Verification, Auto Notify & 3 Ad Slots...")
     app.loop.create_task(init_settings())
     app.loop.create_task(auto_group_messenger())
     app.run()
