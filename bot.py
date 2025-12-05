@@ -1,8 +1,8 @@
 #
 # ----------------------------------------------------
 # Developed by: Ctgmovies23
-# Final Version: Advanced Auto Filter + Web Verification (Toggle System)
-# Status: 100% Verified & Optimized + 6 Button Admin Panel
+# Final Version: Auto Filter + Web Verify + 6 Button Request + Auto Admin Notify
+# Status: 100% Verified & Fixed
 # ----------------------------------------------------
 #
 
@@ -910,7 +910,7 @@ async def search(_, msg: Message):
         await send_results(msg, results, header_text)
         return
 
-    # কিছু না পেলে
+    # কিছু না পেলে -> ১. ইউজারকে বাটন দেখানো ২. এডমিনকে অটো মেসেজ পাঠানো
     await loading_message.delete()
     final_query = tmdb_detected_title if tmdb_detected_title else cleaned_query
     encoded_final_query = urllib.parse.quote_plus(final_query)
@@ -927,6 +927,38 @@ async def search(_, msg: Message):
 
     alert = await msg.reply_text(alert_text, reply_markup=InlineKeyboardMarkup([[req_btn], [google_btn]]), quote=True)
     asyncio.create_task(delete_message_later(alert.chat.id, alert.id))
+
+    # --- AUTO ADMIN NOTIFICATION START ---
+    # মুভি পাওয়া না গেলে এডমিনের কাছে অটোমেটিক মেসেজ যাবে (বাটন সহ)
+    encoded_query_admin = urllib.parse.quote_plus(query)
+    admin_btns = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📤 Uploading", callback_data=f"rep_uploading_{user_id}_{encoded_query_admin}"),
+            InlineKeyboardButton("✅ Uploaded", callback_data=f"rep_uploaded_{user_id}_{encoded_query_admin}")
+        ],
+        [
+            InlineKeyboardButton("❌ Unavailable", callback_data=f"rep_unavailable_{user_id}_{encoded_query_admin}"),
+            InlineKeyboardButton("⚠️ Spelling Error", callback_data=f"rep_spelling_{user_id}_{encoded_query_admin}")
+        ],
+        [
+            InlineKeyboardButton("🗑 Delete Msg", callback_data=f"rep_delete_{user_id}_{encoded_query_admin}")
+        ]
+    ])
+
+    user_mention = msg.from_user.mention
+    admin_msg = (
+        f"⚠️ **MISSING FILE ALERT** (Auto)\n\n"
+        f"👤 User: {user_mention} (`{user_id}`)\n"
+        f"🔍 Search: `{query}`\n\n"
+        f"ইউজার মুভিটি খুঁজে পায়নি। আপনি চাইলে এখনই আপলোড করে নিচের বাটন দিয়ে জানাতে পারেন।"
+    )
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await app.send_message(admin_id, admin_msg, reply_markup=admin_btns)
+        except Exception:
+            pass
+    # --- AUTO ADMIN NOTIFICATION END ---
 
 async def send_results(msg, results, header="🎬 আপনার মুভি পাওয়া গেছে:"):
     # ডাটাবেস থেকে সেটিং চেক (ভেরিফিকেশন অন/অফ)
@@ -1017,7 +1049,7 @@ async def callback_handler(_, cq: CallbackQuery):
             user_mention = user.mention if user else f"User ID: {user_id}"
 
             admin_msg_text = (
-                f"🔔 **নতুন মুভি রিকোয়েস্ট!**\n\n"
+                f"🔔 **নতুন মুভি রিকোয়েস্ট!** (Manual)\n\n"
                 f"👤 রিকোয়েস্টকারী: {user_mention}\n"
                 f"🎬 মুভির নাম: `{movie_name}`\n\n"
                 f"👇 নিচের বাটন দিয়ে রিপ্লাই দিন:"
@@ -1079,7 +1111,7 @@ async def callback_handler(_, cq: CallbackQuery):
 user_last_start_time = {}
 
 if __name__ == "__main__":
-    print("🚀 Bot Started with Toggle Verification & 6-Button Request System...")
+    print("🚀 Bot Started with Toggle Verification & Auto Admin Notification System...")
     app.loop.create_task(init_settings())
     app.loop.create_task(auto_group_messenger())
     app.run()
