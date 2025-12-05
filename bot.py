@@ -2,7 +2,7 @@
 # ----------------------------------------------------
 # Developed by: Ctgmovies23
 # Final Version: Advanced Auto Filter + Web Verification (Toggle System)
-# Status: 100% Verified & Optimized
+# Status: 100% Verified & Optimized + 6 Button Admin Panel
 # ----------------------------------------------------
 #
 
@@ -987,14 +987,99 @@ async def callback_handler(_, cq: CallbackQuery):
     elif data == "cancel_delete_all_movies":
         await cq.message.edit_text("❌ Cancelled!")
 
+    # ------------------- REQUEST SYSTEM (6 Button Admin Panel) -------------------
+    # ইউজার রিকোয়েস্ট করলে এডমিনের কাছে ৬টি বাটনসহ যাবে
     elif data.startswith("request_movie_"):
-        await cq.answer("Request Sent!", show_alert=True)
-        await cq.message.edit_text("✅ Request Submitted!")
+        try:
+            _, user_id_str, movie_name_encoded = data.split("_", 2)
+            user_id = int(user_id_str)
+            movie_name = urllib.parse.unquote_plus(movie_name_encoded)
+            
+            await cq.answer("✅ আপনার রিকোয়েস্ট এডমিনের কাছে পাঠানো হয়েছে!", show_alert=True)
+            await cq.message.edit_text(f"✅ **রিকোয়েস্ট সফল!**\n\n🎬 মুভি: `{movie_name}`\n\nঅনুগ্রহ করে অপেক্ষা করুন, এডমিন শীঘ্রই এটি আপলোড করবেন।")
+
+            buttons = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("📤 Uploading", callback_data=f"rep_uploading_{user_id}_{movie_name_encoded}"),
+                    InlineKeyboardButton("✅ Uploaded", callback_data=f"rep_uploaded_{user_id}_{movie_name_encoded}")
+                ],
+                [
+                    InlineKeyboardButton("❌ Unavailable", callback_data=f"rep_unavailable_{user_id}_{movie_name_encoded}"),
+                    InlineKeyboardButton("🕵️ Already Available", callback_data=f"rep_already_{user_id}_{movie_name_encoded}")
+                ],
+                [
+                    InlineKeyboardButton("⚠️ Spelling Error", callback_data=f"rep_spelling_{user_id}_{movie_name_encoded}"),
+                    InlineKeyboardButton("🗑 Delete Msg", callback_data=f"rep_delete_{user_id}_{movie_name_encoded}")
+                ]
+            ])
+
+            user = await app.get_users(user_id)
+            user_mention = user.mention if user else f"User ID: {user_id}"
+
+            admin_msg_text = (
+                f"🔔 **নতুন মুভি রিকোয়েস্ট!**\n\n"
+                f"👤 রিকোয়েস্টকারী: {user_mention}\n"
+                f"🎬 মুভির নাম: `{movie_name}`\n\n"
+                f"👇 নিচের বাটন দিয়ে রিপ্লাই দিন:"
+            )
+
+            for admin_id in ADMIN_IDS:
+                try:
+                    await app.send_message(chat_id=admin_id, text=admin_msg_text, reply_markup=buttons)
+                except Exception as e:
+                    logger.error(f"Failed to send request to admin {admin_id}: {e}")
+
+        except Exception as e:
+            logger.error(f"Request Error: {e}")
+
+    # এডমিন বাটনে ক্লিক করলে ইউজারের কাছে রিপ্লাই যাবে
+    elif data.startswith("rep_"):
+        try:
+            _, action, user_id_str, movie_name_encoded = data.split("_", 3)
+            user_id = int(user_id_str)
+            movie_name = urllib.parse.unquote_plus(movie_name_encoded)
+            
+            user_msg = ""
+            admin_feedback = ""
+
+            if action == "uploading":
+                user_msg = f"👋 হ্যালো!\n\nআপনার রিকোয়েস্ট করা মুভি **'{movie_name}'** আপলোড করা হচ্ছে।\nকিছুক্ষণ পর আবার সার্চ করুন। 📤"
+                admin_feedback = "✅ আপনি 'Uploading' মার্ক করেছেন।"
+            
+            elif action == "uploaded":
+                user_msg = f"👋 হ্যালো!\n\nআপনার রিকোয়েস্ট করা মুভি **'{movie_name}'** আপলোড করা হয়েছে! ✅\nএখনই বট থেকে সার্চ করে নামিয়ে নিন।"
+                admin_feedback = "✅ আপনি 'Uploaded' মার্ক করেছেন।"
+
+            elif action == "unavailable":
+                user_msg = f"😔 দুঃখিত!\n\nআপনার রিকোয়েস্ট করা **'{movie_name}'** মুভিটি বর্তমানে পাওয়া যাচ্ছে না। ❌"
+                admin_feedback = "✅ আপনি 'Unavailable' মার্ক করেছেন।"
+
+            elif action == "already":
+                user_msg = f"🔍 হ্যালো!\n\nমুভিটি **'{movie_name}'** ইতিমধ্যে আমাদের চ্যানেলে আছে।\nদয়া করে ভালো করে বানান চেক করে আবার সার্চ করুন। 🕵️"
+                admin_feedback = "✅ আপনি 'Already Available' মার্ক করেছেন।"
+
+            elif action == "spelling":
+                user_msg = f"⚠️ হ্যালো!\n\nআপনার রিকোয়েস্ট করা মুভির বানান ভুল মনে হচ্ছে।\nদয়া করে সঠিক বানান (**English**) লিখে আবার সার্চ করুন।"
+                admin_feedback = "✅ আপনি 'Spelling Error' মার্ক করেছেন।"
+
+            elif action == "delete":
+                await cq.message.delete()
+                return
+
+            try:
+                await app.send_message(chat_id=user_id, text=user_msg)
+            except Exception:
+                admin_feedback += "\n(কিন্তু ইউজারকে মেসেজ পাঠানো যায়নি)"
+
+            await cq.message.edit_text(f"🔒 **রিকোয়েস্ট ক্লোজড!**\n🎬 মুভি: `{movie_name}`\n👮 একশন নিয়েছেন: {cq.from_user.mention}\n📝 স্ট্যাটাস: {admin_feedback}")
+
+        except Exception as e:
+            logger.error(f"Admin Reply Error: {e}")
 
 user_last_start_time = {}
 
 if __name__ == "__main__":
-    print("🚀 Bot Started with Toggle Verification System (Final)...")
+    print("🚀 Bot Started with Toggle Verification & 6-Button Request System...")
     app.loop.create_task(init_settings())
     app.loop.create_task(auto_group_messenger())
     app.run()
