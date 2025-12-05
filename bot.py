@@ -2,7 +2,7 @@
 # ----------------------------------------------------
 # Developed by: Ctgmovies23
 # Project: TGLinkBase Auto Filter Bot (Ultimate Edition)
-# Version: 6.1 (Fixed Pagination + Filters + Robust Broadcast)
+# Version: 6.2 (Fixed KeyErrors + Robust Broadcast)
 # Features:
 #   - Auto Filter (MongoDB)
 #   - Multi-Channel Indexing (ID Batch Fetching)
@@ -15,7 +15,7 @@
 #   - Supports Direct Files & Poster Link Posts
 #   - UI: Working Quality, Language, Season Filters
 #   - UI: Smooth Page Navigation (In-Place Edit)
-#   - FIXED: Robust Manual Broadcast System
+#   - FIXED: Old Database Compatibility (KeyError Fix)
 # ----------------------------------------------------
 #
 
@@ -468,7 +468,8 @@ async def create_verification_link(message_id, user_id):
     # Need to fetch the movie to get correct chat_id
     movie = await movies_col.find_one({"message_id": message_id})
     # Default to CHANNEL_ID if not found (backward compatibility)
-    chat_id = movie["chat_id"] if movie else CHANNEL_ID
+    # FIX: Use .get() to avoid KeyError on old data
+    chat_id = movie.get("chat_id", CHANNEL_ID) if movie else CHANNEL_ID
 
     await verify_col.insert_one({
         "token": token,
@@ -989,7 +990,9 @@ async def start(_, msg: Message):
             message_id = int(argument.replace("watch_", ""))
             
             movie = await movies_col.find_one({"message_id": message_id})
-            source_chat_id = movie["chat_id"] if movie else CHANNEL_ID
+            
+            # FIX: Use .get() to avoid KeyError on old entries
+            source_chat_id = movie.get("chat_id", CHANNEL_ID) if movie else CHANNEL_ID
 
             verify_setting = await settings_col.find_one({"key": "verification_mode"})
             is_verify_on = verify_setting.get("value", True) if verify_setting else True
