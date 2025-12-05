@@ -1,8 +1,8 @@
 #
 # ----------------------------------------------------
 # Developed by: Ctgmovies23
-# Final Version: Advanced Auto Filter + Super Fast Broadcast + Web Verification (Ads)
-# Status: 100% Verified & Optimized (Syntax Fixed)
+# Final Version: Advanced Auto Filter + Web Verification (Toggle System)
+# Status: 100% Verified & Optimized
 # ----------------------------------------------------
 #
 
@@ -36,7 +36,7 @@ from fuzzywuzzy import process, fuzz # Fuzzy Logic
 from marshmallow import Schema, fields, ValidationError # Schema Validation
 
 # ------------------- কনফিগারেশন -------------------
-API_ID = int(os.getenv("API_ID", "0")) # Default 0 to prevent int() error if missing
+API_ID = int(os.getenv("API_ID", "0")) 
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
@@ -51,15 +51,16 @@ TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 START_PIC = os.getenv("START_PIC", "https://i.ibb.co/prnGXMr3/photo-2025-05-16-05-15-45-7504908428624527364.jpg")
 BROADCAST_PIC = os.getenv("BROADCAST_PIC", "https://telegra.ph/file/18659550b694b47000787.jpg")
 
-# --- WEB & ADS CONFIGURATION (FIXED SECTION) ---
-# এখানে ডিফল্ট ভ্যালু ফাঁকা রাখা হয়েছে যাতে Syntax Error না হয়।
-# আপনি Koyeb এর Settings -> Environment Variables এ গিয়ে AD_CODE_HEAD এবং AD_CODE_BODY সেট করবেন।
-
+# --- WEB & ADS CONFIGURATION ---
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8080") 
 
-# Triple quotes (""") ব্যবহার করা হয়েছে যাতে HTML কোড বসালেও এরর না দেয়
+# Koyeb থেকে AD_CODE_HEAD এবং AD_CODE_BODY সেট করবেন
 AD_CODE_HEAD = os.getenv("AD_CODE_HEAD", "") 
-AD_CODE_BODY = os.getenv("AD_CODE_BODY", """<h3>Advertisement Area</h3>""") 
+AD_CODE_BODY = os.getenv("AD_CODE_BODY", """
+<div style="text-align: center; color: #ffaa00; margin: 10px;">
+    <h3>⬇️ Download Link Generating... ⬇️</h3>
+</div>
+""") 
 
 # অটো মেসেজ সেটিংস
 AUTO_MSG_INTERVAL = 1200  
@@ -82,7 +83,6 @@ logger = logging.getLogger(__name__)
 app = Client("movie_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # ------------------- MongoDB Setup -------------------
-# MongoDB কানেকশন এরর হ্যান্ডলিং
 try:
     motor_client = AsyncIOMotorClient(DATABASE_URL)
     db = motor_client["movie_bot"]
@@ -125,11 +125,11 @@ movie_schema = MovieSchema()
 
 async def init_settings():
     try:
-        await settings_col.update_one(
-            {"key": "protect_forwarding"},
-            {"$setOnInsert": {"value": True}},
-            upsert=True
-        )
+        # Default Settings
+        await settings_col.update_one({"key": "protect_forwarding"}, {"$setOnInsert": {"value": True}}, upsert=True)
+        # ডিফল্টভাবে ভেরিফিকেশন অন থাকবে (True), আপনি অফ করতে চাইলে /verify off দিবেন
+        await settings_col.update_one({"key": "verification_mode"}, {"$setOnInsert": {"value": True}}, upsert=True)
+        await settings_col.update_one({"key": "global_notify"}, {"$setOnInsert": {"value": True}}, upsert=True)
     except Exception as e:
         logger.error(f"Settings Init Error: {e}")
 
@@ -278,7 +278,7 @@ def verify_page_two(token):
     final_link = f"https://t.me/{bot_username}?start=verified_{token}"
 
     return get_verification_html(
-        heading="Step 2/2: Generatng Download Link...",
+        heading="Step 2/2: Generating Download Link...",
         timer_seconds=10,
         next_link=final_link,
         btn_text="GET FILE NOW ✅"
@@ -600,29 +600,25 @@ async def start(_, msg: Message):
     user_id = msg.from_user.id
     current_time = datetime.now(timezone.utc)
     
-    # স্প্যাম প্রিভেনশন
     if user_id in user_last_start_time:
         if (current_time - user_last_start_time[user_id]) < timedelta(seconds=2):
             return
     user_last_start_time[user_id] = current_time
 
-    # ডাটাবেসে ইউজার আপডেট
     await users_col.update_one(
         {"_id": msg.from_user.id},
         {"$set": {"joined": datetime.now(timezone.utc), "notify": True}},
         upsert=True
     )
 
-    # আরগুমেন্ট চেকিং (verified_ অথবা watch_)
     if len(msg.command) > 1:
         argument = msg.command[1]
         
-        # --- NEW VERIFICATION HANDLER ---
+        # --- VERIFICATION HANDLER (When Ads are ON) ---
         if argument.startswith("verified_"):
             token = argument.replace("verified_", "")
             verify_data = await verify_col.find_one({"token": token})
 
-            # ভ্যালিডেশন চেক
             if not verify_data:
                 await msg.reply("❌ **লিংকটি মেয়াদোত্তীর্ণ!**\nদয়া করে আবার সার্চ করুন।", quote=True)
                 return
@@ -635,7 +631,6 @@ async def start(_, msg: Message):
                 await msg.reply("⚠️ **ভেরিফিকেশন অসম্পূর্ণ!**\nদয়া করে লিংকে ক্লিক করে ২য় ধাপ সম্পন্ন করুন।", quote=True)
                 return
 
-            # সব ঠিক থাকলে ফাইল পাঠানো
             message_id = verify_data["movie_id"]
             try:
                 protect_setting = await settings_col.find_one({"key": "protect_forwarding"})
@@ -648,7 +643,6 @@ async def start(_, msg: Message):
                     protect_content=should_protect 
                 )
                 
-                # টোকেন ডিলিট (একবার ব্যবহারের জন্য)
                 await verify_col.delete_one({"token": token})
                 await movies_col.update_one({"message_id": message_id}, {"$inc": {"views_count": 1}})
                 
@@ -662,13 +656,17 @@ async def start(_, msg: Message):
                 await msg.reply("❌ মুভিটি খুঁজে পাওয়া যাচ্ছে না (সম্ভবত ডিলিট হয়ে গেছে)।")
             return
             
-        # --- OLD DIRECT LINK HANDLER (Fallback) ---
+        # --- DIRECT LINK HANDLER (When Ads are OFF) ---
         elif argument.startswith("watch_"):
             message_id = int(argument.replace("watch_", ""))
             try:
-                await app.copy_message(msg.chat.id, CHANNEL_ID, message_id)
+                protect_setting = await settings_col.find_one({"key": "protect_forwarding"})
+                should_protect = protect_setting.get("value", True) if protect_setting else True
+                
+                await app.copy_message(msg.chat.id, CHANNEL_ID, message_id, protect_content=should_protect)
+                await movies_col.update_one({"message_id": message_id}, {"$inc": {"views_count": 1}})
             except:
-                await msg.reply("Error fetching file.")
+                await msg.reply("❌ Error fetching file.")
             return
 
     # সাধারণ ওয়েলকাম মেসেজ
@@ -697,7 +695,19 @@ WEB VERIFICATION SYSTEM.
 
     await msg.reply_photo(photo=START_PIC, caption=start_caption, reply_markup=btns)
 
-# ------------------- অ্যাডমিন কমান্ড -------------------
+# ------------------- অ্যাডমিন কমান্ড (Toggle Verification included) -------------------
+
+@app.on_message(filters.command("verify") & filters.user(ADMIN_IDS))
+async def toggle_verification(_, msg: Message):
+    if len(msg.command) != 2 or msg.command[1] not in ["on", "off"]:
+        await msg.reply("ব্যবহার:\n`/verify on` - ওয়েবসাইট ভেরিফিকেশন চালু (Ads অন)\n`/verify off` - ডাইরেক্ট ফাইল (Ads অফ)")
+        return
+    
+    new_status = True if msg.command[1] == "on" else False
+    await settings_col.update_one({"key": "verification_mode"}, {"$set": {"value": new_status}}, upsert=True)
+    
+    text = "✅ **ভেরিফিকেশন মোড চালু হয়েছে!**\nএখন ইউজাররা ওয়েবসাইট হয়ে ফাইল পাবে।" if new_status else "🚫 **ভেরিফিকেশন মোড বন্ধ হয়েছে!**\nএখন ইউজাররা সরাসরি ফাইল পাবে।"
+    await msg.reply(text)
 
 @app.on_message(filters.command("broadcast") & filters.user(ADMIN_IDS))
 async def broadcast(_, msg: Message):
@@ -824,9 +834,9 @@ async def request_movie(_, msg: Message):
             await app.send_message(admin_id, f"❗ *নতুন অনুরোধ!*\n🎬 `{movie_name}`\n👤 [{username}](tg://user?id={user_id})", reply_markup=admin_btns)
         except: pass
 
-# ------------------- স্মার্ট সার্চ হ্যান্ডলার -------------------
+# ------------------- স্মার্ট সার্চ হ্যান্ডলার (With Toggle Logic) -------------------
 
-@app.on_message(filters.text & ~filters.command(["start", "broadcast", "stats", "feedback", "request", "popular", "notify", "delete_movie", "delete_all_movies", "forward_toggle"]) & (filters.group | filters.private))
+@app.on_message(filters.text & ~filters.command(["start", "verify", "broadcast", "stats", "feedback", "request", "popular", "notify", "delete_movie", "delete_all_movies", "forward_toggle"]) & (filters.group | filters.private))
 async def search(_, msg: Message):
     query = msg.text.strip()
     if not query: return
@@ -897,7 +907,7 @@ async def search(_, msg: Message):
     if results:
         await loading_message.delete()
         header_text = f"🎬 **আপনার মুভি পাওয়া গেছে:**\n{search_source}" if search_source else "🎬 **আপনার মুভি পাওয়া গেছে:**"
-        await send_results(msg, results, f"{header_text}\n👇 নিচের লিংকে ক্লিক করে ভেরিফাই করুন:")
+        await send_results(msg, results, header_text)
         return
 
     # কিছু না পেলে
@@ -918,7 +928,11 @@ async def search(_, msg: Message):
     alert = await msg.reply_text(alert_text, reply_markup=InlineKeyboardMarkup([[req_btn], [google_btn]]), quote=True)
     asyncio.create_task(delete_message_later(alert.chat.id, alert.id))
 
-async def send_results(msg, results, header="🎬 আপনার কাঙ্ক্ষিত মুভি পাওয়া গেছে:"):
+async def send_results(msg, results, header="🎬 আপনার মুভি পাওয়া গেছে:"):
+    # ডাটাবেস থেকে সেটিং চেক (ভেরিফিকেশন অন/অফ)
+    setting = await settings_col.find_one({"key": "verification_mode"})
+    is_verify_on = setting.get("value", True) if setting else True
+    
     buttons = []
     user_id = msg.from_user.id
     
@@ -926,17 +940,25 @@ async def send_results(msg, results, header="🎬 আপনার কাঙ্�
         title = movie.get('title') or movie.get('original_title')
         mid = movie['message_id']
         
-        # জেনারেট হচ্ছে ভেরিফিকেশন লিংক
-        web_link = await create_verification_link(mid, user_id)
+        if is_verify_on:
+            # ভেরিফিকেশন অন: ওয়েবসাইটের লিংক (Flask)
+            link = await create_verification_link(mid, user_id)
+        else:
+            # ভেরিফিকেশন অফ: ডাইরেক্ট টেলিগ্রাম স্টার্ট লিংক
+            bot_username = app.me.username
+            link = f"https://t.me/{bot_username}?start=watch_{mid}"
         
         buttons.append([
             InlineKeyboardButton(
                 text=f"{title[:35]}...",
-                url=web_link # Flask Web Link
+                url=link
             )
         ])
     
-    m = await msg.reply(header, reply_markup=InlineKeyboardMarkup(buttons), quote=True)
+    footer = "👇 নিচের লিংকে ক্লিক করে ভেরিফাই করুন:" if is_verify_on else "👇 ডাউনলোড করতে ক্লিক করুন:"
+    final_text = f"{header}\n{footer}"
+    
+    m = await msg.reply(final_text, reply_markup=InlineKeyboardMarkup(buttons), quote=True)
     asyncio.create_task(delete_message_later(m.chat.id, m.id))
 
 # ------------------- Callback Handlers -------------------
@@ -972,7 +994,7 @@ async def callback_handler(_, cq: CallbackQuery):
 user_last_start_time = {}
 
 if __name__ == "__main__":
-    print("🚀 Bot Started with Web Verification & Ads System...")
+    print("🚀 Bot Started with Toggle Verification System (Final)...")
     app.loop.create_task(init_settings())
     app.loop.create_task(auto_group_messenger())
     app.run()
