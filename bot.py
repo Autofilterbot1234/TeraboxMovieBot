@@ -2,7 +2,7 @@
 # ----------------------------------------------------
 # Developed by: Ctgmovies23
 # Project: TGLinkBase Auto Filter Bot (Ultimate Edition)
-# Version: 7.0 (File Store + Auto Delete Added)
+# Version: 6.2 (Fixed KeyErrors + Robust Broadcast)
 # Features:
 #   - Auto Filter (MongoDB)
 #   - Multi-Channel Indexing (ID Batch Fetching)
@@ -15,7 +15,7 @@
 #   - Supports Direct Files & Poster Link Posts
 #   - UI: Working Quality, Language, Season Filters
 #   - UI: Smooth Page Navigation (In-Place Edit)
-#   - NEW: File Store System (Permanent Link + 10m Auto Delete)
+#   - FIXED: Old Database Compatibility (KeyError Fix)
 # ----------------------------------------------------
 #
 
@@ -74,13 +74,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0")) 
 # Admin IDs (comma separated)
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
-
-# [NEW] Log Channel for File Store (Must be Private Channel & Bot needs Admin)
-LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0")) 
-
-# Channels for Buttons (File Store)
-UPDATE_CHANNEL = os.getenv("UPDATE_CHANNEL", "https://t.me/TGLinkBase") # Button 1
-JOIN_CHANNEL = os.getenv("JOIN_CHANNEL", "https://t.me/TGLinkBase")   # Button 2
+# Channel to redirect for updates
+UPDATE_CHANNEL = os.getenv("UPDATE_CHANNEL", "https://t.me/TGLinkBase")
 
 # Database
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -146,7 +141,6 @@ try:
     requests_col = db["requests"]
     feedback_col = db["feedback"]
     verify_col = db["verification"] 
-    store_col = db["file_store"] # [NEW] Collection for File Store
 
     # Sync Client for Indexing & TTL
     sync_client = MongoClient(DATABASE_URL)
@@ -923,57 +917,6 @@ async def index_channel_handler(_, msg: Message):
         f"🗑 বাদ দেওয়া হয়েছে: **{total_skipped}** টি"
     )
 
-# ==============================================================================
-#                      NEW: FILE STORE HANDLER (ADMIN ONLY)
-# ==============================================================================
-
-@app.on_message(filters.command("link") & filters.user(ADMIN_IDS) & filters.reply)
-async def file_store_link_generator(_, msg: Message):
-    """
-    ফাইল লজ চ্যানেল এ সেভ করবে এবং পার্মানেন্ট লিংক দিবে।
-    শুধুমাত্র এডমিন ব্যবহার করতে পারবে।
-    """
-    try:
-        reply = msg.reply_to_message
-        if not (reply.document or reply.video or reply.audio or reply.photo):
-            return await msg.reply("❌ দয়া করে কোনো ফাইলে রিপ্লাই দিয়ে কমান্ড দিন।")
-
-        # ১. ফাইলটি লগ চ্যানেলে কপি করা (যাতে আজীবন থাকে)
-        if LOG_CHANNEL_ID == 0:
-            return await msg.reply("❌ LOG_CHANNEL_ID সেট করা হয়নি!")
-
-        wait_msg = await msg.reply("🔄 প্রসেসিং হচ্ছে...")
-
-        # লগ চ্যানেলে পাঠানো
-        forwarded_msg = await reply.copy(LOG_CHANNEL_ID)
-        
-        # ২. ইউনিক কোড তৈরি
-        file_code = secrets.token_urlsafe(8) 
-        
-        # ৩. ডাটাবেসে সেভ করা
-        await store_col.insert_one({
-            "code": file_code,
-            "msg_id": forwarded_msg.id,
-            "chat_id": LOG_CHANNEL_ID,
-            "caption": reply.caption or "",
-            "created_at": datetime.now(timezone.utc)
-        })
-
-        # ৪. লিংক তৈরি
-        bot_username = app.me.username
-        link = f"https://t.me/{bot_username}?start=store_{file_code}"
-
-        await wait_msg.edit_text(
-            f"✅ **পার্মানেন্ট ফাইল লিংক তৈরি হয়েছে!**\n\n"
-            f"🔗 লিংক: `{link}`\n\n"
-            f"⚠️ *নোট: ইউজার এই লিংক থেকে ফাইল নিলে ১০ মিনিট পর অটো ডিলিট হয়ে যাবে।*",
-            disable_web_page_preview=True
-        )
-
-    except Exception as e:
-        logger.error(f"Store Error: {e}")
-        await msg.reply(f"❌ এরর: {e}")
-
 # 4. START COMMAND (Logic Hub)
 user_last_start_time = {}
 
@@ -1076,46 +1019,6 @@ async def start(_, msg: Message):
                 await msg.reply("❌ ফাইলটি পাওয়া যাচ্ছে না।")
             return
 
-        # --- C. FILE STORE HANDLER (10 MIN DELETE + BUTTONS) ---
-        elif argument.startswith("store_"):
-            code = argument.replace("store_", "")
-            data = await store_col.find_one({"code": code})
-            
-            if not data:
-                return await msg.reply("❌ **লিংকটি ভুল বা ফাইলটি ডিলিট হয়ে গেছে!**")
-
-            try:
-                # Channel Buttons
-                buttons = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📢 JOIN UPDATE CHANNEL 1", url=UPDATE_CHANNEL)],
-                    [InlineKeyboardButton("📢 JOIN UPDATE CHANNEL 2", url=JOIN_CHANNEL)]
-                ])
-
-                # Send File
-                sent_msg = await app.copy_message(
-                    chat_id=msg.chat.id,
-                    from_chat_id=data["chat_id"],
-                    message_id=data["msg_id"],
-                    caption=data.get("caption", ""),
-                    protect_content=should_protect,
-                    reply_markup=buttons
-                )
-                
-                # Warning Message
-                warn_msg = await msg.reply(
-                    f"⚠️ **সতর্কবার্তা:**\nএই ফাইলটি **১০ মিনিট** পর অটোমেটিক ডিলিট হয়ে যাবে!\nদ্রুত ডাউনলোড বা ফরোয়ার্ড করে নিন।",
-                    quote=True
-                )
-
-                # Auto Delete Task (600 Seconds = 10 Minutes)
-                asyncio.create_task(delete_message_later(msg.chat.id, sent_msg.id, delay=600))
-                asyncio.create_task(delete_message_later(msg.chat.id, warn_msg.id, delay=600))
-                
-            except Exception as e:
-                await msg.reply("❌ ফাইলটি উদ্ধার করা সম্ভব হয়নি (চ্যানেল থেকে ডিলিট হয়ে থাকতে পারে)।")
-                logger.error(f"Store Fetch Error: {e}")
-            return
-
     # Normal Welcome Message
     greeting = get_greeting()
     user_mention = msg.from_user.mention
@@ -1169,6 +1072,8 @@ async def toggle_verification(_, msg: Message):
 # ==============================================================================
 #                           UPDATED BROADCAST HANDLER
 # ==============================================================================
+# এই অংশটি আপনার চাহিদা অনুযায়ী আপডেট করা হয়েছে।
+# এটি কোনো মেসেজে রিপ্লাই দিয়ে /broadcast কমান্ড দিলে কাজ করবে।
 
 @app.on_message(filters.command("broadcast") & filters.user(ADMIN_IDS) & filters.reply)
 async def broadcast_handler(bot, m):
@@ -1351,7 +1256,7 @@ async def request_movie(_, msg: Message):
 
 # ------------------- SMART SEARCH HANDLER -------------------
 
-@app.on_message(filters.text & ~filters.command(["start", "index", "delete_movie", "delete_all_movies", "protect", "verify", "broadcast", "notify", "stats", "feedback", "request", "link"]) & (filters.group | filters.private))
+@app.on_message(filters.text & ~filters.command(["start", "index", "delete_movie", "delete_all_movies", "protect", "verify", "broadcast", "notify", "stats", "feedback", "request"]) & (filters.group | filters.private))
 async def search(_, msg: Message):
     query = msg.text.strip()
     if not query: return
@@ -1768,7 +1673,7 @@ async def callback_handler(_, cq: CallbackQuery):
         logger.error(f"Callback Error: {e}")
 
 if __name__ == "__main__":
-    print("🚀 Bot Started (Final Version with File Store & Auto Delete)...")
+    print("🚀 Bot Started (Ultimate Version with Pagination & Filters)...")
     Thread(target=run_flask).start() # Start Flask Web Server
     app.loop.create_task(init_settings()) # Init Settings
     app.loop.create_task(auto_group_messenger()) # Start Auto Msg
