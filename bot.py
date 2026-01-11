@@ -2,7 +2,7 @@
 # ----------------------------------------------------
 # Developed by: Ctgmovies23
 # Project: TGLinkBase Auto Filter Bot (Ultimate Edition)
-# Version: 6.2 (Fixed KeyErrors + Robust Broadcast)
+# Version: 6.3 (Group Message Auto Delete Feature)
 # Features:
 #   - Auto Filter (MongoDB)
 #   - Multi-Channel Indexing (ID Batch Fetching)
@@ -16,6 +16,7 @@
 #   - UI: Working Quality, Language, Season Filters
 #   - UI: Smooth Page Navigation (In-Place Edit)
 #   - FIXED: Old Database Compatibility (KeyError Fix)
+#   - NEW: Auto Delete User Message on Success
 # ----------------------------------------------------
 #
 
@@ -1281,12 +1282,23 @@ async def search(_, msg: Message):
 
     if results:
         await loading_message.delete()
+
+        # --- AUTO DELETE USER MESSAGE IF FOUND (GROUP ONLY) ---
+        if msg.chat.type in ["group", "supergroup"]:
+            try:
+                await msg.delete()
+            except Exception:
+                pass # Bot might not have delete permissions, so skip if error
+        # ------------------------------------------------------
+
         header_text = f"🎬 **আপনার মুভি পাওয়া গেছে:**\n{search_source}" if search_source else "🎬 **আপনার মুভি পাওয়া গেছে:**"
         
         await send_results(msg, results, total_count, offset=0, header=header_text, from_callback=False)
         return
 
     await loading_message.delete()
+    # Note: We do NOT delete msg here, so it stays in the group as per request
+    
     final_query = tmdb_detected_title if tmdb_detected_title else cleaned_query
     encoded_final_query = urllib.parse.quote_plus(final_query)
     Google_Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(final_query)
