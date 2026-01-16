@@ -14,6 +14,8 @@
 #   - Auto Admin Notification
 #   - Auto Broadcast & Group Messenger
 #   - Smart Search (TMDB + Spelling Correction)
+#   - UI: Working Quality, Language, Season Filters
+#   - UI: Smooth Page Navigation
 # ----------------------------------------------------
 #
 
