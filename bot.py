@@ -1,11 +1,12 @@
 #
 # ----------------------------------------------------
 # Developed by: Ctgmovies23
-# Project: TGLinkBase Auto Filter Bot (Ultimate Edition)
-# Version: 6.3 (Group Message Auto Delete Feature)
+# Project: TGLinkBase Auto Filter Bot (Backup Edition)
+# Version: 7.2 (Original Code Structure + Backup System)
 # Features:
 #   - Auto Filter (MongoDB)
-#   - Multi-Channel Indexing (ID Batch Fetching)
+#   - PERMANENT BACKUP (Clones files to Log Channel) 🛡️ [NEW]
+#   - Multi-Channel Indexing (Backup Mode)
 #   - Safe Bulk Delete (Preview & Confirm)
 #   - Web Verification (Flask + Ads)
 #   - Content Protection (Forward Block)
@@ -15,8 +16,7 @@
 #   - Supports Direct Files & Poster Link Posts
 #   - UI: Working Quality, Language, Season Filters
 #   - UI: Smooth Page Navigation (In-Place Edit)
-#   - FIXED: Old Database Compatibility (KeyError Fix)
-#   - NEW: Auto Delete User Message on Success
+#   - FIXED: Source Channel Deletion Issue
 # ----------------------------------------------------
 #
 
@@ -73,6 +73,11 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 # Channels & Admins
 # Primary Channel for default uploads
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0")) 
+
+# 🔥 LOG CHANNEL (BACKUP STORAGE) - এখানে সব ফাইল কপি হবে
+# এই চ্যানেলটি অবশ্যই প্রাইভেট হতে হবে এবং বট এখানে অ্যাডমিন থাকবে
+LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0"))
+
 # Admin IDs (comma separated)
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
 # Channel to redirect for updates
@@ -148,23 +153,31 @@ try:
     sync_db = sync_client["movie_bot"]
     
     # Creating Indexes for Faster Search
-    # Note: Removed unique=True from message_id to allow same message_id from different channels
     sync_db.movies.create_index([("title_clean", ASCENDING)], background=True)
+    sync_db.movies.create_index([("title", ASCENDING)], background=True) # Regex Support
     sync_db.movies.create_index("language", background=True)
     sync_db.movies.create_index([("views_count", ASCENDING)], background=True)
-    sync_db.movies.create_index([("chat_id", ASCENDING)], background=True) # New for multi-channel
+    
+    # 🔥 UNIQUE INDEX FOR BACKUP SYSTEM
+    # এটি নিশ্চিত করবে যে একই ফাইল বারবার ব্যাকআপ হয়ে স্টোরেজ নষ্ট করবে না
+    # এবং লগ চ্যানেলের মেসেজ আইডি ট্র্যাক করবে
+    sync_db.movies.create_index(
+        [("chat_id", ASCENDING), ("message_id", ASCENDING)], 
+        unique=True, 
+        background=True
+    )
     
     # TTL Index (Verification Token expires after 1 hour)
     sync_db.verification.create_index("created_at", expireAfterSeconds=3600)
     
-    print("✅ Database Connected & Indexes Created Successfully!")
+    print("✅ Database Connected & Backup System Ready!")
 except Exception as e:
     print(f"⚠️ Database Connection Error: {e}")
     exit()
 
 # Data Validation Schema
 class MovieSchema(Schema):
-    chat_id = fields.Int(required=True) # Source Channel ID
+    chat_id = fields.Int(required=True) # Source Channel ID (Now LOG CHANNEL ID)
     message_id = fields.Int(required=True) # Message ID
     title = fields.Str(required=True)
     title_clean = fields.Str(required=True)
@@ -192,7 +205,7 @@ async def init_settings():
 
 flask_app = Flask(__name__)
 
-# Full HTML Template
+# Full HTML Template (As per original code)
 def get_verification_html(heading, timer_seconds, next_link, btn_text):
     return f"""
     <!DOCTYPE html>
@@ -468,15 +481,14 @@ async def create_verification_link(message_id, user_id):
     
     # Need to fetch the movie to get correct chat_id
     movie = await movies_col.find_one({"message_id": message_id})
-    # Default to CHANNEL_ID if not found (backward compatibility)
-    # FIX: Use .get() to avoid KeyError on old data
-    chat_id = movie.get("chat_id", CHANNEL_ID) if movie else CHANNEL_ID
+    # Default to LOG_CHANNEL_ID (Using Backup)
+    chat_id = movie.get("chat_id", LOG_CHANNEL_ID) if movie else LOG_CHANNEL_ID
 
     await verify_col.insert_one({
         "token": token,
         "user_id": user_id,
         "movie_id": message_id,
-        "chat_id": chat_id, # Storing chat_id is crucial for multi-channel
+        "chat_id": chat_id, # Storing chat_id is crucial
         "step": 1,
         "created_at": datetime.now(timezone.utc)
     })
@@ -534,27 +546,16 @@ async def get_search_results(query, offset=0):
     """
     raw_year = extract_year(query)
     cleaned_query = smart_search_clean(query)
-    # If cleaned query is empty (e.g. only '720p' was typed), use original lower query
     if not cleaned_query: cleaned_query = query.lower()
 
-    # Note: If user added a filter (e.g. "Avengers 720p"), smart_search_clean removes "720p".
-    # But we want to support filters. So we check if the original query has filter words.
-    # To make filters work without breaking smart clean, we use the raw query for Regex if smart clean seems too short.
-    
-    # Improved Search Logic for Filters:
-    # We will search using regex on BOTH 'title_clean' AND 'title' fields.
-    # If the user typed "Avengers 720p", cleaned_query might just be "avengers". 
-    # But we want to respect "720p".
-    # So we use the query string passed to this function for regex.
-    
-    search_query_regex = re.escape(query.strip()) # Use the full query (with filters)
+    # Regex logic for filters support
+    search_query_regex = re.escape(query.strip()) 
     
     search_source = ""
     results = []
     total_count = 0
 
     # 1. Direct Regex Search (Matches Title OR Clean Title)
-    # This supports "Avengers 720p" matching against "Avengers: Endgame (2019) [720p]"
     query_filter = {
         "$or": [
             {"title_clean": {"$regex": search_query_regex, "$options": "i"}},
@@ -563,16 +564,14 @@ async def get_search_results(query, offset=0):
     }
     if raw_year: query_filter["year"] = raw_year
     
-    # Get total count first for pagination
     total_count = await movies_col.count_documents(query_filter)
     
     if total_count > 0:
         cursor = movies_col.find(query_filter).sort("views_count", -1).skip(offset).limit(RESULTS_COUNT)
         results = await cursor.to_list(length=RESULTS_COUNT)
     
-    # 2. Loose Search (only if no direct results found & no specific year filter)
+    # 2. Loose Search
     if not results and not raw_year:
-        # Fallback to cleaned query
         loose_pattern = re.escape(cleaned_query)
         loose_filter = {"title_clean": {"$regex": loose_pattern, "$options": "i"}}
         
@@ -582,7 +581,7 @@ async def get_search_results(query, offset=0):
             cursor = movies_col.find(loose_filter).sort("views_count", -1).skip(offset).limit(RESULTS_COUNT)
             results = await cursor.to_list(length=RESULTS_COUNT)
 
-    # 3. TMDB Search (only on first page)
+    # 3. TMDB Search
     tmdb_detected_title = None
     if not results and offset == 0: 
         tmdb_detected_title = await get_tmdb_suggestion(cleaned_query)
@@ -615,58 +614,72 @@ async def get_search_results(query, offset=0):
     return results, total_count, search_source, cleaned_query, tmdb_detected_title
 
 # ==============================================================================
-#                           CORE LOGIC: SAVING & BROADCAST
+#                           CORE LOGIC: BACKUP & SAVE (UPDATED)
 # ==============================================================================
 
 async def process_movie_save(message):
     """
-    Parses a message and saves it to the database.
-    Ensures 'Same to Same' copy by saving the ID and extracting the Title from the first line.
-    Works for both Direct Files and Link Posts (Photos with Captions).
+    🔥 UPDATED BACKUP LOGIC:
+    1. Receives message (Text/File/Photo/Video) from ANY channel.
+    2. Copies it to LOG_CHANNEL_ID (Private Storage).
+    3. Saves the Log Channel Message ID to Database.
+    Result: Files are permanently stored even if original channel is deleted.
     """
-    text = message.caption or message.text
-    if not text: 
+    if not (message.photo or message.video or message.document or message.text):
         return None
 
-    if not (message.photo or message.video or message.document or message.audio):
-        return None
-
-    movie_title = text.splitlines()[0].strip()
+    # Get Content & Title
+    content = message.caption or message.text or ""
+    movie_title = content.splitlines()[0].strip()
     
     if len(movie_title) < 2: 
         return None
-    
-    thumbnail_file_id = None
-    if message.photo:
-        thumbnail_file_id = message.photo.file_id 
-    elif message.video and message.video.thumbs:
-        thumbnail_file_id = message.video.thumbs[0].file_id 
-    elif message.document and message.document.thumbs:
-        thumbnail_file_id = message.document.thumbs[0].file_id
 
-    raw_data = {
-        "chat_id": message.chat.id,    # Source Channel ID
-        "message_id": message.id,      # Source Message ID
-        "title": movie_title,          # Display Title
-        "full_caption": text,          # Full Caption
-        "date": message.date,
-        "year": extract_year(text),    
-        "language": extract_language(text), 
-        "title_clean": clean_text(text), 
-        "views_count": 0,
-        "thumbnail_id": thumbnail_file_id 
-    }
+    # Optional: Check if already exists to save storage space
+    title_clean = clean_text(movie_title)
+    if await movies_col.find_one({"title_clean": title_clean}):
+        return None  # Skip if already backed up
 
     try:
-        existing = await movies_col.find_one({"chat_id": message.chat.id, "message_id": message.id})
-        if not existing:
-            validated_data = movie_schema.load(raw_data)
-            await movies_col.insert_one(validated_data)
-            return movie_title
-    except ValidationError as err:
-        logger.error(f"Validation Error: {err.messages}")
+        # 🚀 CLONE STEP: Copy to Log Channel
+        # This is the "Backup" magic.
+        backup_msg = await message.copy(chat_id=LOG_CHANNEL_ID)
+        
+        # Extract Thumbnail from the *Backup* message
+        thumbnail_id = None
+        if backup_msg.photo: 
+            thumbnail_id = backup_msg.photo.file_id
+        elif backup_msg.video and backup_msg.video.thumbs: 
+            thumbnail_id = backup_msg.video.thumbs[0].file_id
+        elif backup_msg.document and backup_msg.document.thumbs: 
+            thumbnail_id = backup_msg.document.thumbs[0].file_id
+
+        # Prepare Data (Pointing to LOG CHANNEL)
+        raw_data = {
+            "chat_id": LOG_CHANNEL_ID,      # Permanent Storage ID
+            "message_id": backup_msg.id,    # Permanent Message ID
+            "title": movie_title,           # Original Title
+            "full_caption": content,        # Full Text/Link
+            "date": datetime.now(timezone.utc),
+            "year": extract_year(content),    
+            "language": extract_language(content), 
+            "title_clean": title_clean, 
+            "views_count": 0,
+            "thumbnail_id": thumbnail_id 
+        }
+
+        # Save to DB
+        validated_data = movie_schema.load(raw_data)
+        await movies_col.insert_one(validated_data)
+        
+        return movie_title
+
+    except FloodWait as e:
+        # If telegram limits us, wait and retry
+        await asyncio.sleep(e.value)
+        return await process_movie_save(message)
     except Exception as e:
-        logger.error(f"Save Error: {e}")
+        logger.error(f"Backup Error: {e}")
     
     return None
 
@@ -694,7 +707,7 @@ async def auto_group_messenger():
         await asyncio.sleep(AUTO_MSG_INTERVAL)
 
 async def broadcast_messages(cursor, message_func, status_msg=None, total_users=0):
-    """ Robust Broadcast Function with Progress Bar (Used for Auto-Notification) """
+    """ Robust Broadcast Function with Progress Bar """
     success = 0
     failed = 0
     start_time = time.time()
@@ -772,7 +785,13 @@ async def broadcast_messages(cursor, message_func, status_msg=None, total_users=
 
 async def auto_broadcast_worker(movie_title, message_id, thumbnail_id=None):
     """ Automatically notifies all users when a new movie is added """
-    download_link = f"https://t.me/{app.me.username}?start=watch_{message_id}"
+    # Even though we backup to Log Channel, for broadcast link we need ID.
+    # We find the file in DB to get the correct Log Channel Message ID
+    movie = await movies_col.find_one({"title": movie_title})
+    if not movie: return
+
+    final_id = movie["message_id"]
+    download_link = f"https://t.me/{app.me.username}?start=watch_{final_id}"
     
     download_button = InlineKeyboardMarkup([
         [InlineKeyboardButton("📥 ডাউনলোড করতে ক্লিক করুন", url=download_link)]
@@ -804,7 +823,7 @@ async def auto_broadcast_worker(movie_title, message_id, thumbnail_id=None):
 #                           BOT HANDLERS & COMMANDS
 # ==============================================================================
 
-# 1. AUTO SAVE FROM PRIMARY CHANNEL
+# 1. AUTO SAVE FROM PRIMARY CHANNEL (Using Backup Logic)
 @app.on_message(filters.chat(CHANNEL_ID))
 async def save_post(_, msg: Message):
     title = await process_movie_save(msg)
@@ -824,11 +843,21 @@ async def log_group(_, msg: Message):
         upsert=True
     )
 
-# 3. MANUAL INDEXING COMMAND (For Multi-Channel)
+# 3. BACKUP INDEXING COMMAND (Replaces old /index)
+INDEX_CANCEL = False
+
+@app.on_message(filters.command("stop_index") & filters.user(ADMIN_IDS))
+async def stop_index(_, msg: Message):
+    global INDEX_CANCEL
+    INDEX_CANCEL = True
+    await msg.reply("🛑 **Stopping Backup Process...**")
+
 @app.on_message(filters.command("index") & filters.user(ADMIN_IDS))
 async def index_channel_handler(_, msg: Message):
-    target_chat_id = None
+    global INDEX_CANCEL
+    INDEX_CANCEL = False
     
+    target_chat_id = None
     if msg.reply_to_message and msg.reply_to_message.forward_from_chat:
         target_chat_id = msg.reply_to_message.forward_from_chat.id
     elif len(msg.command) > 1:
@@ -836,86 +865,71 @@ async def index_channel_handler(_, msg: Message):
         except: pass
 
     if not target_chat_id:
-        return await msg.reply("❌ চ্যানেল আইডি পাওয়া যায়নি। সঠিক নিয়ম: `/index -100xxxx` অথবা চ্যানেল থেকে ফরোয়ার্ড করা মেসেজে রিপ্লাই দিন।")
+        return await msg.reply("❌ চ্যানেল আইডি পাওয়া যায়নি। সঠিক নিয়ম: `/index -100xxxx`")
+    if target_chat_id == LOG_CHANNEL_ID:
+        return await msg.reply("❌ আপনি লগ চ্যানেলকেই ইনডেক্স করতে পারবেন না।")
 
     try:
-        check_msg = await app.send_message(target_chat_id, "⚠️ **Indexing Logic initialized...**")
+        check_msg = await app.send_message(target_chat_id, "🔍 **Backup Check...**")
         last_msg_id = check_msg.id
         await check_msg.delete()
     except Exception as e:
-        return await msg.reply(f"❌ **Error:** বট ওই চ্যানেলে মেসেজ পাঠাতে পারছে না। বটকে অবশ্যই **Admin** হতে হবে।\nError: {e}")
+        return await msg.reply(f"❌ **Error:** বট ওই চ্যানেলে এক্সেস পাচ্ছে না।\nError: {e}")
 
-    status_msg = await msg.reply(f"⏳ **Indexing Started...**\n🎯 Target: `{target_chat_id}`\n🔢 Last ID: `{last_msg_id}`\n🚀 Speed: `Safe Mode`")
+    status_msg = await msg.reply(
+        f"🚀 **BACKUP & INDEX STARTED**\n\n"
+        f"📤 Source: `{target_chat_id}`\n"
+        f"📥 Destination: `Log Channel`\n"
+        f"📦 Total IDs: `{last_msg_id}`\n\n"
+        f"⚠️ **Note:** এটি ফাইল কপি করছে, তাই একটু সময় লাগবে।"
+    )
     
-    total_indexed = 0
-    total_skipped = 0
-    already_exists = 0
+    total_cloned = 0
+    skipped = 0
     
-    batch_size = 100
-    
-    try:
-        for i in range(last_msg_id, 0, -batch_size):
-            try:
-                start_id = i
-                end_id = max(1, i - batch_size + 1)
-                ids = list(range(start_id, end_id - 1, -1))
-                
-                try:
-                    messages = await app.get_messages(target_chat_id, ids)
-                except FloodWait as e:
-                    await asyncio.sleep(e.value + 2) 
-                    messages = await app.get_messages(target_chat_id, ids)
-                except Exception as e:
-                    logger.error(f"Fetch Error: {e}")
-                    continue
+    # Looping backwards (Newest to Oldest)
+    for i in range(last_msg_id, 0, -1):
+        if INDEX_CANCEL: break
+        
+        try:
+            message = await app.get_messages(target_chat_id, i)
+            if not message or message.empty or message.service:
+                continue
 
-                if not messages:
-                    continue
-
-                for message in messages:
-                    if not message or message.empty:
-                        continue
-                        
-                    try:
-                        exists = await movies_col.find_one({"chat_id": target_chat_id, "message_id": message.id})
-                        if exists:
-                            already_exists += 1
-                            continue
-
-                        saved_title = await process_movie_save(message)
-                        if saved_title: 
-                            total_indexed += 1
-                        else:
-                            total_skipped += 1
-                    except Exception as inner_e:
-                        logger.error(f"Save Error: {inner_e}")
-                
-                await asyncio.sleep(1.5)
-                
-                if i % 200 == 0:
-                    try: 
-                        await status_msg.edit_text(
-                            f"⏳ **Indexing Running...**\n"
-                            f"📡 Scanning IDs: {start_id} ➝ {end_id}\n"
-                            f"✅ Saved: {total_indexed}\n"
-                            f"♻️ Already Exists: {already_exists}\n"
-                            f"⏭ Skipped (No Media): {total_skipped}"
-                        )
-                    except: pass
+            # Clone & Save
+            saved_title = await process_movie_save(message)
+            
+            if saved_title:
+                total_cloned += 1
+            else:
+                skipped += 1
+            
+            # Rate Limit Protection (Sleep every 5 success)
+            if total_cloned % 5 == 0:
+                await asyncio.sleep(1)
+            
+            # Update Status
+            if i % 20 == 0:
+                try: 
+                    await status_msg.edit_text(
+                        f"🔄 **Backup Running...**\n"
+                        f"🆔 Processing ID: `{i}`\n"
+                        f"✅ Cloned & Saved: `{total_cloned}`\n"
+                        f"⏩ Skipped/Exists: `{skipped}`"
+                    )
+                except: pass
                     
-            except Exception as e:
-                logger.error(f"Batch Loop Error: {e}")
-                pass
-
-    except Exception as e:
-        return await status_msg.edit_text(f"❌ **Critical Error:** {e}")
+        except FloodWait as e:
+            await asyncio.sleep(e.value + 5)
+        except Exception as e:
+            logger.error(f"Index Error: {e}")
+            pass
 
     await status_msg.edit_text(
-        f"✅ **Indexing Completed!**\n"
-        f"📂 চ্যানেল: `{target_chat_id}`\n"
-        f"💾 নতুন সেভ হয়েছে: **{total_indexed}** টি\n"
-        f"♻️ আগে থেকেই ছিল: **{already_exists}** টি\n"
-        f"🗑 বাদ দেওয়া হয়েছে: **{total_skipped}** টি"
+        f"✅ **Backup Completed!**\n"
+        f"📂 নতুন ফাইল কপি করা হয়েছে: **{total_cloned}** টি\n"
+        f"⏩ স্কিপ করা হয়েছে: **{skipped}** টি\n"
+        f"এখন সোর্স চ্যানেল ডিলিট হলেও ফাইল বটের কাছে থাকবে।"
     )
 
 # 4. START COMMAND (Logic Hub)
@@ -961,9 +975,8 @@ async def start(_, msg: Message):
                 return
 
             message_id = verify_data["movie_id"]
-            
-            # Get Source Chat ID (Fallback to CHANNEL_ID if missing)
-            source_chat_id = verify_data.get("chat_id", CHANNEL_ID)
+            # Retrieving from LOG CHANNEL
+            source_chat_id = verify_data.get("chat_id", LOG_CHANNEL_ID)
 
             try:
                 await app.copy_message(
@@ -990,10 +1003,9 @@ async def start(_, msg: Message):
         elif argument.startswith("watch_"):
             message_id = int(argument.replace("watch_", ""))
             
+            # For backward compatibility, check DB for chat_id, else use LOG_CHANNEL_ID
             movie = await movies_col.find_one({"message_id": message_id})
-            
-            # FIX: Use .get() to avoid KeyError on old entries
-            source_chat_id = movie.get("chat_id", CHANNEL_ID) if movie else CHANNEL_ID
+            source_chat_id = movie.get("chat_id", LOG_CHANNEL_ID) if movie else LOG_CHANNEL_ID
 
             verify_setting = await settings_col.find_one({"key": "verification_mode"})
             is_verify_on = verify_setting.get("value", True) if verify_setting else True
@@ -1070,12 +1082,7 @@ async def toggle_verification(_, msg: Message):
     await settings_col.update_one({"key": "verification_mode"}, {"$set": {"value": new_status}}, upsert=True)
     await msg.reply(f"🌍 **ভেরিফিকেশন মোড {'চালু' if new_status else 'বন্ধ'} করা হয়েছে!**")
 
-# ==============================================================================
-#                           UPDATED BROADCAST HANDLER
-# ==============================================================================
-# এই অংশটি আপনার চাহিদা অনুযায়ী আপডেট করা হয়েছে।
-# এটি কোনো মেসেজে রিপ্লাই দিয়ে /broadcast কমান্ড দিলে কাজ করবে।
-
+# Broadcast
 @app.on_message(filters.command("broadcast") & filters.user(ADMIN_IDS) & filters.reply)
 async def broadcast_handler(bot, m):
     # শুরুর সময় এবং স্ট্যাটাস মেসেজ
@@ -1157,7 +1164,7 @@ async def stats(_, msg: Message):
         f"📊 **Bot Statistics**\n\n"
         f"👤 Users: {total_users}\n"
         f"👥 Groups: {total_groups}\n"
-        f"🎬 Movies: {total_movies}"
+        f"🎬 Indexed Files: {total_movies}"
     )
     asyncio.create_task(delete_message_later(stats_msg.chat.id, stats_msg.id))
 
@@ -1257,7 +1264,7 @@ async def request_movie(_, msg: Message):
 
 # ------------------- SMART SEARCH HANDLER -------------------
 
-@app.on_message(filters.text & ~filters.command(["start", "index", "delete_movie", "delete_all_movies", "protect", "verify", "broadcast", "notify", "stats", "feedback", "request"]) & (filters.group | filters.private))
+@app.on_message(filters.text & ~filters.command(["start", "index", "delete_movie", "delete_all_movies", "protect", "verify", "broadcast", "notify", "stats", "feedback", "request", "stop_index"]) & (filters.group | filters.private))
 async def search(_, msg: Message):
     query = msg.text.strip()
     if not query: return
@@ -1309,8 +1316,8 @@ async def search(_, msg: Message):
     alert_text = (
         f"❌ **'{query}'** পাওয়া যায়নি।\n"
         f"💡 **আপনি কি এটি খুঁজছিলেন?** 👉 **{tmdb_detected_title}**\n\n"
-        f"রিকোয়েস্ট করতে নিচের বাটনে ক্লিক করুন。"
-    ) if tmdb_detected_title else f"❌ দুঃখিত! **'{cleaned_query}'** পাওয়া যায়নি。"
+        f"রিকোয়েস্ট করতে নিচের বাটনে ক্লিক করুন।"
+    ) if tmdb_detected_title else f"❌ দুঃখিত! **'{cleaned_query}'** পাওয়া যায়নি।"
 
     alert = await msg.reply_text(alert_text, reply_markup=InlineKeyboardMarkup([[req_btn], [google_btn]]), quote=True)
     asyncio.create_task(delete_message_later(alert.chat.id, alert.id))
@@ -1359,6 +1366,7 @@ async def send_results(msg, results, total_count, offset=0, header="🎬 আপ�
         title = movie.get('title') or movie.get('original_title')
         mid = movie['message_id']
         
+        # LINK GENERATION (NOW POINTS TO LOG CHANNEL)
         if is_verify_on:
             link = await create_verification_link(mid, user_id)
         else:
