@@ -2,10 +2,11 @@
 # ----------------------------------------------------
 # Developed by: Ctgmovies23
 # Project: TGLinkBase Auto Filter Bot (Universal Final Edition)
-# Version: 9.5 (Professional Indexing + Fixed Notify)
+# Version: 10.0 (Auto Delete + Professional Indexing)
 # Features:
 #   - Auto Filter (MongoDB)
 #   - UNIVERSAL STORAGE: Saves Videos, Files, Photos, AND Text Links ✅
+#   - FILE AUTO DELETE: Files delete after 10 mins to prevent copyright ✅
 #   - INDEPENDENT: Works even if Bot is kicked from source channel ✅
 #   - Multi-Channel Indexing (Professional Progress Bar) ✅
 #   - Safe Bulk Delete (Preview & Confirm)
@@ -102,9 +103,10 @@ AD_CODE_BODY = os.getenv("AD_CODE_BODY", """
 """) 
 AD_CODE_BOTTOM = os.getenv("AD_CODE_BOTTOM", "") 
 
-# Auto Group Message Settings
-AUTO_MSG_INTERVAL = 1200  # 20 Minutes
-AUTO_MSG_DELETE_TIME = 300 # 5 Minutes
+# --- AUTO DELETE SETTINGS ---
+AUTO_MSG_INTERVAL = 1200  # 20 Minutes (Group Auto Msg Loop)
+AUTO_MSG_DELETE_TIME = 300 # 5 Minutes (Group Auto Msg Delete)
+FILE_AUTO_DELETE_TIME = 600 # 10 Minutes (Main Movie File Delete Time)
 
 AUTO_MESSAGE_TEXT = """
 🎬✨ **নিয়মিত মুভি আপডেট!** ✨🎬
@@ -428,7 +430,7 @@ def clean_text(text):
 def smart_search_clean(text):
     """Cleans user query for searching."""
     text = text.lower()
-    text = re.sub(r'\[.*?\]', '', text)
+    text = re.sub(r'\[.*?\]', '', text) 
     text = re.sub(r'\(.*?\)', '', text)
     text = re.sub(r'\b(480p|720p|1080p|2160p|4k|8k|hd|fhd|bluray|web-dl|webrip|camrip|dvdscr)\b', '', text)
     text = re.sub(r'\b(19|20)\d{2}\b', '', text)
@@ -689,25 +691,27 @@ async def process_movie_save(message):
     return None, None
 
 async def send_cached_media(chat_id, movie_data, protect=True):
-    """Sends content based on stored data (Independent of Source Channel)"""
+    """Sends content based on stored data (Independent of Source Channel) - Returns Message Object"""
     file_id = movie_data.get("file_id")
     file_type = movie_data.get("file_type")
     caption = movie_data.get("full_caption", "")
     
     try:
+        sent_msg = None
         if file_type == "video" and file_id != "None":
-            await app.send_video(chat_id, file_id, caption=caption, protect_content=protect)
+            sent_msg = await app.send_video(chat_id, file_id, caption=caption, protect_content=protect)
         elif file_type == "document" and file_id != "None":
-            await app.send_document(chat_id, file_id, caption=caption, protect_content=protect)
+            sent_msg = await app.send_document(chat_id, file_id, caption=caption, protect_content=protect)
         elif file_type == "photo" and file_id != "None":
-            await app.send_photo(chat_id, file_id, caption=caption, protect_content=protect)
+            sent_msg = await app.send_photo(chat_id, file_id, caption=caption, protect_content=protect)
         elif file_type == "text":
             # Send stored text directly
-            await app.send_message(chat_id, text=caption, disable_web_page_preview=False, protect_content=protect)
-        return True
+            sent_msg = await app.send_message(chat_id, text=caption, disable_web_page_preview=False, protect_content=protect)
+        
+        return sent_msg
     except Exception as e:
         logger.error(f"Send Error: {e}")
-        return False
+        return None
 
 async def auto_group_messenger():
     """ Sends auto messages to all groups every 20 minutes """
@@ -1056,16 +1060,32 @@ async def start(_, msg: Message):
             if not movie: return await msg.reply("❌ File not found in DB.")
 
             try:
-                # Deliver File
+                # Deliver File & Capture Message
+                sent_msg = None
                 if "file_id" in movie:
-                    await send_cached_media(msg.chat.id, movie, should_protect)
+                    sent_msg = await send_cached_media(msg.chat.id, movie, should_protect)
                 else:
                     # Legacy Fallback
-                    await app.copy_message(msg.chat.id, movie["chat_id"], movie["message_id"], protect_content=should_protect)
+                    sent_msg = await app.copy_message(msg.chat.id, movie["chat_id"], movie["message_id"], protect_content=should_protect)
                 
+                # 🔥 AUTO DELETE LOGIC (Verified Path)
+                if sent_msg:
+                    # Determine Msg ID
+                    msg_id_to_del = sent_msg.id if isinstance(sent_msg, Message) else (msg.id + 1)
+                    
+                    # Schedule File Delete
+                    asyncio.create_task(delete_message_later(msg.chat.id, msg_id_to_del, FILE_AUTO_DELETE_TIME))
+                    
+                    # Send & Schedule Warning Delete
+                    warning = await msg.reply(
+                        f"⚠️ **সতর্কতা!**\n\nকপিরাইট আইনের কারণে এই ফাইলটি **১০ মিনিট** পর অটোমেটিক ডিলিট হয়ে যাবে।\nদ্রুত ফরওয়ার্ড বা সেভ করে নিন।"
+                    )
+                    asyncio.create_task(delete_message_later(msg.chat.id, warning.id, FILE_AUTO_DELETE_TIME))
+
                 await verify_col.delete_one({"token": token})
                 await movies_col.update_one({"_id": movie["_id"]}, {"$inc": {"views_count": 1}})
                 
+                # Report Button
                 action_buttons = InlineKeyboardMarkup([
                     [InlineKeyboardButton("⚠️ রিপোর্ট / সমস্যা", callback_data=f"report_{movie.get('message_id', 0)}")]
                 ])
@@ -1107,10 +1127,26 @@ async def start(_, msg: Message):
                 return
             
             try:
+                # Deliver File & Capture Message
+                sent_msg = None
                 if "file_id" in movie:
-                    await send_cached_media(msg.chat.id, movie, should_protect)
+                    sent_msg = await send_cached_media(msg.chat.id, movie, should_protect)
                 else:
-                    await app.copy_message(msg.chat.id, movie["chat_id"], movie["message_id"], protect_content=should_protect)
+                    sent_msg = await app.copy_message(msg.chat.id, movie["chat_id"], movie["message_id"], protect_content=should_protect)
+                
+                # 🔥 AUTO DELETE LOGIC (Direct Path)
+                if sent_msg:
+                    msg_id_to_del = sent_msg.id if isinstance(sent_msg, Message) else (msg.id + 1)
+                    
+                    # Schedule File Delete
+                    asyncio.create_task(delete_message_later(msg.chat.id, msg_id_to_del, FILE_AUTO_DELETE_TIME))
+                    
+                    # Send & Schedule Warning Delete
+                    warning = await msg.reply(
+                        f"⚠️ **সতর্কতা!**\n\nকপিরাইট আইনের কারণে এই ফাইলটি **১০ মিনিট** পর অটোমেটিক ডিলিট হয়ে যাবে।\nদ্রুত ফরওয়ার্ড বা সেভ করে নিন।"
+                    )
+                    asyncio.create_task(delete_message_later(msg.chat.id, warning.id, FILE_AUTO_DELETE_TIME))
+
                 await movies_col.update_one({"_id": movie["_id"]}, {"$inc": {"views_count": 1}})
             except:
                 await msg.reply("❌ ফাইলটি পাওয়া যাচ্ছে না।")
