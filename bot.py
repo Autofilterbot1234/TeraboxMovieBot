@@ -2,20 +2,18 @@
 # ----------------------------------------------------
 # Developed by: Ctgmovies23
 # Project: TGLinkBase Auto Filter Bot (Universal Final Edition)
-# Version: 9.0 (Original Features + File ID Storage)
+# Version: 9.5 (Professional Indexing + Fixed Notify)
 # Features:
 #   - Auto Filter (MongoDB)
 #   - UNIVERSAL STORAGE: Saves Videos, Files, Photos, AND Text Links ✅
 #   - INDEPENDENT: Works even if Bot is kicked from source channel ✅
-#   - Multi-Channel Indexing (ID Batch Fetching)
+#   - Multi-Channel Indexing (Professional Progress Bar) ✅
 #   - Safe Bulk Delete (Preview & Confirm)
 #   - Web Verification (Flask + Ads)
 #   - Content Protection (Forward Block)
 #   - Auto Admin Notification
 #   - Auto Broadcast & Group Messenger
 #   - Smart Search (TMDB + Spelling Correction)
-#   - UI: Working Quality, Language, Season Filters
-#   - UI: Smooth Page Navigation
 # ----------------------------------------------------
 #
 
@@ -617,10 +615,11 @@ async def process_movie_save(message):
     """
     UNIVERSAL SAVER: Handles Video, Document, Photo, AND Text Links.
     Stores File ID or Text Content directly. Works even if bot is kicked later.
+    Returns tuple: (title, file_unique_id) or (None, None)
     """
     # 1. Content Check
     if not (message.video or message.document or message.photo or message.text):
-        return None
+        return None, None
 
     file_id = None
     file_unique_id = None
@@ -652,11 +651,11 @@ async def process_movie_save(message):
 
     content = message.caption or message.text or ""
     movie_title = content.splitlines()[0].strip()
-    if len(movie_title) < 2: return None
+    if len(movie_title) < 2: return None, None
 
     # 3. Duplicate Check (Using Unique ID)
     if await movies_col.find_one({"file_unique_id": file_unique_id}):
-        return None
+        return None, None
 
     # 4. Prepare Data
     raw_data = {
@@ -680,12 +679,12 @@ async def process_movie_save(message):
         # Save to DB
         validated_data = movie_schema.load(raw_data)
         await movies_col.insert_one(validated_data)
-        return movie_title
+        return movie_title, file_unique_id
     except Exception as e:
         if "E11000" not in str(e): # Ignore duplicate errors silently
             logger.error(f"Save Error: {e}")
     
-    return None
+    return None, None
 
 async def send_cached_media(chat_id, movie_data, protect=True):
     """Sends content based on stored data (Independent of Source Channel)"""
@@ -829,7 +828,11 @@ async def auto_broadcast_worker(movie_title, file_unique_id, thumbnail_id=None):
 
     async def send_func(user_id):
         if thumbnail_id:
-            msg = await app.send_photo(user_id, photo=thumbnail_id, caption=notification_caption, reply_markup=download_button)
+            try:
+                msg = await app.send_photo(user_id, photo=thumbnail_id, caption=notification_caption, reply_markup=download_button)
+            except Exception:
+                # Fallback if photo invalid
+                msg = await app.send_message(user_id, notification_caption, reply_markup=download_button)
         else:
             msg = await app.send_message(user_id, notification_caption, reply_markup=download_button)
         if msg: asyncio.create_task(delete_message_later(msg.chat.id, msg.id, delay=86400))
@@ -841,17 +844,24 @@ async def auto_broadcast_worker(movie_title, file_unique_id, thumbnail_id=None):
 #                           BOT HANDLERS & COMMANDS
 # ==============================================================================
 
-# 1. AUTO SAVE FROM PRIMARY CHANNEL (Updated)
+# 1. AUTO SAVE FROM PRIMARY CHANNEL (Updated & Fixed)
 @app.on_message(filters.chat(CHANNEL_ID))
 async def save_post(_, msg: Message):
-    title = await process_movie_save(msg)
-    if title:
+    title, unique_id = await process_movie_save(msg)
+    if title and unique_id:
         setting = await settings_col.find_one({"key": "global_notify"})
         if setting and setting.get("value", True):
-            thumb = msg.photo.file_id if msg.photo else (msg.video.thumbs[0].file_id if msg.video and msg.video.thumbs else None)
-            # Find unique ID for broadcast link
-            m = await movies_col.find_one({"title": title})
-            if m: asyncio.create_task(auto_broadcast_worker(title, m["file_unique_id"], thumb))
+            # Safer thumb extraction
+            thumb = None
+            if msg.photo:
+                thumb = msg.photo.file_id
+            elif msg.video and msg.video.thumbs:
+                thumb = msg.video.thumbs[0].file_id
+            elif msg.document and msg.document.thumbs:
+                thumb = msg.document.thumbs[0].file_id
+            
+            # Use unique_id directly (Fixes wrong link issue)
+            asyncio.create_task(auto_broadcast_worker(title, unique_id, thumb))
 
 # 2. LOG GROUP ACTIVATION
 @app.on_message(filters.group, group=10)
@@ -862,7 +872,7 @@ async def log_group(_, msg: Message):
         upsert=True
     )
 
-# 3. MANUAL INDEXING COMMAND (Universal)
+# 3. MANUAL INDEXING COMMAND (Professional with Progress Bar)
 INDEX_CANCEL = False
 
 @app.on_message(filters.command("stop_index") & filters.user(ADMIN_IDS))
@@ -893,30 +903,34 @@ async def index_channel_handler(_, msg: Message):
     except Exception as e:
         return await msg.reply(f"❌ **Error:** বট ওই চ্যানেলে মেসেজ পাঠাতে পারছে না। বটকে অবশ্যই **Admin** হতে হবে।\nError: {e}")
 
+    # Initial Status Message
     status_msg = await msg.reply(
-        f"⏳ **Universal Indexing Started...**\n"
-        f"🎯 Target: `{target_chat_id}`\n"
-        f"🔢 Total IDs: `{last_msg_id}`\n"
-        f"🛡️ Mode: **File ID Storage (Safe to Kick Bot)**"
+        f"⏳ **Indexing Started...**\n\n"
+        f"🎯 Channel: `{target_chat_id}`\n"
+        f"🔢 Total Messages: `{last_msg_id}`\n"
+        f"⚡ Please wait..."
     )
     
     total_indexed = 0
     total_skipped = 0
     
-    batch_size = 100
+    start_time = time.time()
+    batch_size = 200  # Optimized Batch Size
     
     try:
         for i in range(last_msg_id, 0, -batch_size):
             if INDEX_CANCEL: break
+            
+            # Start of batch logic
+            start_id = i
+            end_id = max(1, i - batch_size + 1)
+            ids = list(range(start_id, end_id - 1, -1))
+            
             try:
-                start_id = i
-                end_id = max(1, i - batch_size + 1)
-                ids = list(range(start_id, end_id - 1, -1))
-                
                 try:
                     messages = await app.get_messages(target_chat_id, ids)
                 except FloodWait as e:
-                    await asyncio.sleep(e.value + 2) 
+                    await asyncio.sleep(e.value + 5) 
                     messages = await app.get_messages(target_chat_id, ids)
                 except Exception:
                     continue
@@ -928,24 +942,45 @@ async def index_channel_handler(_, msg: Message):
                         
                     try:
                         # Universal Save Logic
-                        saved_title = await process_movie_save(message)
+                        saved_title, _ = await process_movie_save(message)
+                        
                         if saved_title: 
                             total_indexed += 1
                         else:
-                            total_skipped += 1
+                            total_skipped += 1 # Counts both "Duplicate" and "No Media" as skipped
+                            
                     except Exception:
                         pass
                 
-                await asyncio.sleep(1.5)
+                # --- UPDATE PROGRESS BAR ---
+                current_time = time.time()
+                elapsed = current_time - start_time
+                if elapsed == 0: elapsed = 1
                 
-                if i % 200 == 0:
-                    try: 
-                        await status_msg.edit_text(
-                            f"⏳ **Indexing Running...**\n"
-                            f"📡 Scanning IDs: {start_id} ➝ {end_id}\n"
-                            f"✅ Saved: {total_indexed}\n"
-                            f"⏭ Skipped: {total_skipped}"
+                processed = last_msg_id - end_id
+                percentage = (processed / last_msg_id) * 100
+                speed = processed / elapsed
+                
+                remaining_msgs = end_id
+                eta = remaining_msgs / speed if speed > 0 else 0
+                
+                # Visual Bar [■■■■□□□□□□]
+                progress_blocks = int(percentage // 10)
+                progress_bar = f"[{'■' * progress_blocks}{'□' * (10 - progress_blocks)}]"
+                
+                # Update Edit (Limit to every ~5 seconds to avoid FloodWait on edits)
+                if i % 400 == 0 or i < batch_size:
+                    try:
+                        text = (
+                            f"🔄 **Indexing Progress...**\n"
+                            f"{progress_bar} **{percentage:.1f}%**\n\n"
+                            f"📂 Processed: `{processed}` / `{last_msg_id}`\n"
+                            f"✅ Saved: `{total_indexed}`\n"
+                            f"♻️ Skipped/Dup: `{total_skipped}`\n"
+                            f"⚡ Speed: `{speed:.1f} msg/s`\n"
+                            f"⏳ ETA: `{get_readable_time(eta)}`"
                         )
+                        await status_msg.edit_text(text)
                     except: pass
                     
             except Exception:
@@ -954,12 +989,16 @@ async def index_channel_handler(_, msg: Message):
     except Exception as e:
         return await status_msg.edit_text(f"❌ **Error:** {e}")
 
+    # Final Summary
+    total_time = time.time() - start_time
     await status_msg.edit_text(
-        f"✅ **Indexing Completed!**\n"
-        f"📂 চ্যানেল: `{target_chat_id}`\n"
-        f"💾 নতুন সেভ হয়েছে: **{total_indexed}** টি\n"
-        f"🗑 বাদ দেওয়া হয়েছে: **{total_skipped}** টি\n"
-        f"💡 এখন আপনি চাইলে সোর্স চ্যানেল থেকে বট রিমুভ করতে পারেন।"
+        f"✅ **Indexing Completed!**\n\n"
+        f"📂 Channel: `{target_chat_id}`\n"
+        f"⏱ Time Taken: `{get_readable_time(total_time)}`\n"
+        f"📊 **Final Stats:**\n"
+        f"   ├ ✅ Total Saved: **{total_indexed}**\n"
+        f"   └ ♻️ Skipped/Duplicate: **{total_skipped}**\n\n"
+        f"💡 Indexing finished successfully."
     )
 
 # 4. START COMMAND (Logic Hub)
