@@ -1692,9 +1692,53 @@ async def callback_handler(_, cq: CallbackQuery):
     except Exception as e:
         logger.error(f"Callback Error: {e}")
 
+# ==============================================================================
+#                           MAIN EXECUTION (DEBUG MODE)
+# ==============================================================================
+
+async def start_bot_and_check():
+    print("⏳ Connecting to Telegram...")
+    await app.start()
+    
+    me = await app.get_me()
+    print(f"✅ Bot Started as {me.username}")
+
+    # --- LOG CHANNEL TEST ---
+    print(f"🔍 Testing Log Channel Access: {LOG_CHANNEL_ID}")
+    try:
+        # টেস্ট মেসেজ পাঠানো
+        sent = await app.send_message(LOG_CHANNEL_ID, "✅ **Bot Connection Test Successful!**")
+        print("✅ SUCCESS: Bot can verify the Log Channel!")
+        # মেসেজটি ডিলিট করে দিবে
+        await sent.delete()
+    except PeerIdInvalid:
+        print(f"❌ CRITICAL ERROR: 'PeerIdInvalid'.")
+        print("👉 কারণ: চ্যানেল আইডি ভুল অথবা বট ওই চ্যানেলে নেই।")
+        print("👉 সমাধান: নতুন একটি চ্যানেল খুলুন, বটকে এডমিন দিন এবং নতুন আইডি বসান।")
+        return # এখানে স্টপ হয়ে যাবে
+    except ChannelInvalid:
+        print(f"❌ ERROR: 'ChannelInvalid'.")
+        print("👉 কারণ: চ্যানেলটি হয়তো ডিলিট হয়ে গেছে বা বটের এক্সেস নেই।")
+        return
+    except Exception as e:
+        print(f"❌ UNKNOWN ERROR in Log Channel: {e}")
+        return
+    # ------------------------
+
+    print("🚀 All Systems Go! Bot is running...")
+    
+    # অন্যান্য টাস্ক চালু করা
+    Thread(target=run_flask).start()
+    asyncio.create_task(init_settings())
+    asyncio.create_task(auto_group_messenger())
+    
+    # বট রানিং রাখা
+    await idle()
+    await app.stop()
+
 if __name__ == "__main__":
-    print("🚀 Bot Started (Ultimate Version with Pagination & Filters)...")
-    Thread(target=run_flask).start() # Start Flask Web Server
-    app.loop.create_task(init_settings()) # Init Settings
-    app.loop.create_task(auto_group_messenger()) # Start Auto Msg
-    app.run() # Start Bot
+    from pyrogram import idle
+    try:
+        app.run(start_bot_and_check())
+    except Exception as e:
+        print(f"❌ Start Error: {e}")
