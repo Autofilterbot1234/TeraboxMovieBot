@@ -2,7 +2,7 @@
 # ----------------------------------------------------
 # Developed by: Ctgmovies23
 # Project: TGLinkBase Auto Filter Bot (Universal Final Edition)
-# Version: 10.1 (Auto Delete + Professional Indexing + Anti-Link)
+# Version: 10.2 (Auto Delete + Professional Indexing + Safe Anti-Link)
 # Features:
 #   - Auto Filter (MongoDB)
 #   - UNIVERSAL STORAGE: Saves Videos, Files, Photos, AND Text Links ✅
@@ -15,7 +15,7 @@
 #   - Auto Admin Notification
 #   - Auto Broadcast & Group Messenger
 #   - Smart Search (TMDB + Spelling Correction)
-#   - Anti-Link System (Blocks Non-Admin Links in Group) ✅
+#   - Anti-Link System (Warning First + Auto Delete) ✅
 #   - UI: Working Quality, Language, Season Filters
 #   - UI: Smooth Page Navigation
 # ----------------------------------------------------
@@ -881,35 +881,42 @@ async def log_group(_, msg: Message):
     )
 
 # ==============================================================================
-#                           ANTI-LINK SYSTEM (GROUP)
+#                           ANTI-LINK SYSTEM (WARNING FIRST)
 # ==============================================================================
 
-@app.on_message(filters.group & (filters.text | filters.caption), group=5)
+@app.on_message(filters.group & (filters.text | filters.caption), group=100)
 async def anti_link_handler(client, message):
-    # Check text/caption for links
+    # ১. ইউজার যদি বট হয় তবে ইগনোর করবে
+    if not message.from_user or message.from_user.is_bot:
+        return
+
+    # ২. মেসেজ থেকে টেক্সট বের করা
     text_content = message.text or message.caption or ""
     
-    # Regex to detect links
-    if re.search(r"(https?://|www\.|t\.me/|telegram\.me/)", text_content, flags=re.IGNORECASE):
+    # ৩. লিংক চেক করা (যেকোনো লিংক)
+    # এই Regex টি শুধুমাত্র লিংক ধরবে, সাধারণ টেক্সট বা মুভি নাম ধরবে না
+    if re.search(r"(https?://|www\.|t\.me/|telegram\.me/|youtu\.be|[a-z0-9-]+\.(com|net|org|xyz|info))", text_content, flags=re.IGNORECASE):
+        
         try:
-            # Check user status (Admin/Owner)
+            # ৪. এডমিন চেক করা (এডমিন হলে লিংক ডিলিট হবে না)
             member = await client.get_chat_member(message.chat.id, message.from_user.id)
             if member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
                 return 
             
-            # Delete Link
+            # ৫. আগে ওয়ার্নিং পাঠানো (রিপ্লাই না করে সরাসরি চ্যাটে পাঠানো)
+            # এতে ইউজার রেস্ট্রিক্টেড হবে না
+            warning_msg = await client.send_message(
+                chat_id=message.chat.id,
+                text=f"⚠️ {message.from_user.mention}, **লিংক শেয়ার করা নিষিদ্ধ!**\nদয়া করে গ্রুপে কোনো লিংক শেয়ার করবেন না।"
+            )
+
+            # ৬. এরপর লিংক ডিলিট করা
             await message.delete()
             
-            # Send Warning
-            warning_msg = await message.reply(
-                f"🚫 **লিংক শেয়ার নিষিদ্ধ!** {message.from_user.mention}\n\n"
-                f"⚠️ এই গ্রুপে এডমিন ছাড়া অন্য কেউ লিংক শেয়ার করতে পারবে না।\n"
-                f"পুনরায় এমন করলে আপনাকে গ্রুপ থেকে ব্যান করা হতে পারে।"
-            )
-            
-            # Auto Delete Warning after 10s
-            await asyncio.sleep(10)
+            # ৭. ১৫ সেকেন্ড পর ওয়ার্নিং মেসেজ ডিলিট (যাতে ইউজার পড়ার সময় পায়)
+            await asyncio.sleep(15)
             await warning_msg.delete()
+            
         except Exception:
             pass
 
@@ -1834,7 +1841,7 @@ async def callback_handler(_, cq: CallbackQuery):
         logger.error(f"Callback Error: {e}")
 
 if __name__ == "__main__":
-    print("🚀 Bot Started (Universal Final Edition + Anti-Link)...")
+    print("🚀 Bot Started (Universal Final Edition + Safe Anti-Link)...")
     Thread(target=run_flask).start() # Start Flask Web Server
     app.loop.create_task(init_settings()) # Init Settings
     app.loop.create_task(auto_group_messenger()) # Start Auto Msg
