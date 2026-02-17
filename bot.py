@@ -2,7 +2,7 @@
 # ----------------------------------------------------
 # Developed by: Ctgmovies23
 # Project: TGLinkBase Auto Filter Bot (Universal Final Edition)
-# Version: 10.0 (Auto Delete + Professional Indexing)
+# Version: 10.1 (Auto Delete + Professional Indexing + Anti-Link)
 # Features:
 #   - Auto Filter (MongoDB)
 #   - UNIVERSAL STORAGE: Saves Videos, Files, Photos, AND Text Links ✅
@@ -15,6 +15,7 @@
 #   - Auto Admin Notification
 #   - Auto Broadcast & Group Messenger
 #   - Smart Search (TMDB + Spelling Correction)
+#   - Anti-Link System (Blocks Non-Admin Links in Group) ✅
 #   - UI: Working Quality, Language, Season Filters
 #   - UI: Smooth Page Navigation
 # ----------------------------------------------------
@@ -39,6 +40,7 @@ from flask import Flask # For Web Verification Server
 
 # ------------------- PYROGRAM -------------------
 from pyrogram import Client, filters
+from pyrogram.enums import ChatMemberStatus # Added for Anti-Link Check
 from pyrogram.types import (
     Message, 
     InlineKeyboardMarkup, 
@@ -877,6 +879,39 @@ async def log_group(_, msg: Message):
         {"$set": {"title": msg.chat.title, "active": True}}, 
         upsert=True
     )
+
+# ==============================================================================
+#                           ANTI-LINK SYSTEM (GROUP)
+# ==============================================================================
+
+@app.on_message(filters.group & (filters.text | filters.caption), group=5)
+async def anti_link_handler(client, message):
+    # Check text/caption for links
+    text_content = message.text or message.caption or ""
+    
+    # Regex to detect links
+    if re.search(r"(https?://|www\.|t\.me/|telegram\.me/)", text_content, flags=re.IGNORECASE):
+        try:
+            # Check user status (Admin/Owner)
+            member = await client.get_chat_member(message.chat.id, message.from_user.id)
+            if member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+                return 
+            
+            # Delete Link
+            await message.delete()
+            
+            # Send Warning
+            warning_msg = await message.reply(
+                f"🚫 **লিংক শেয়ার নিষিদ্ধ!** {message.from_user.mention}\n\n"
+                f"⚠️ এই গ্রুপে এডমিন ছাড়া অন্য কেউ লিংক শেয়ার করতে পারবে না।\n"
+                f"পুনরায় এমন করলে আপনাকে গ্রুপ থেকে ব্যান করা হতে পারে।"
+            )
+            
+            # Auto Delete Warning after 10s
+            await asyncio.sleep(10)
+            await warning_msg.delete()
+        except Exception:
+            pass
 
 # 3. MANUAL INDEXING COMMAND (Professional with Progress Bar)
 INDEX_CANCEL = False
@@ -1799,7 +1834,7 @@ async def callback_handler(_, cq: CallbackQuery):
         logger.error(f"Callback Error: {e}")
 
 if __name__ == "__main__":
-    print("🚀 Bot Started (Universal Final Edition)...")
+    print("🚀 Bot Started (Universal Final Edition + Anti-Link)...")
     Thread(target=run_flask).start() # Start Flask Web Server
     app.loop.create_task(init_settings()) # Init Settings
     app.loop.create_task(auto_group_messenger()) # Start Auto Msg
